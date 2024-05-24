@@ -1,97 +1,66 @@
 #!/usr/bin/env python3.12
 import json
-from collections import UserDict, UserList
+import os
 from sys import argv
-from typing import Self, TextIO
-
-type TrackedDict = ...
-type TrackedArray = ...
-type TrackedPrimitive = ...
+from typing import TextIO
 
 
-def transform_json_to_tracked[T](thing: T) -> TrackedDict | TrackedArray | TrackedPrimitive:
-    if isinstance(thing, dict):
-        obj = TrackedDict()
-        for k, v in thing.items():
-            obj[k] = v
-        return obj
-
-    if isinstance(thing, list):
-        arr = TrackedArray()
-        arr.append(thing)
-        return arr
-
-    return TrackedPrimitive(thing)
-
-
-class TrackedPrimitive:
-    def __init__(self, value):
-        self.instances = 1
-        self.values = [value]
+def auto_str(cls):
+    """Automatically implements __str__ for any class."""
 
     def __str__(self):
-        return f"TrackedPrimitive {self.values}"
+        return '%s(%s)' % (
+            type(self).__name__,
+            ', '.join('%s=%s' % item for item in vars(self).items())
+        )
 
-    def __repr__(self):
-        return str(self)
-
-    @property
-    def data(self) -> ...:
-        return self.values[-1]
-
-    def increment(self, key, value) -> Self:
-        self.instances += 1
-        self.values.append(value)
-        return self
+    cls.__str__ = __str__
+    return cls
 
 
-class TrackedArray(UserList):
-    def __str__(self):
-        return f"TrackedArray {self.data}"
-
-    def __repr__(self):
-        return str(self)
-
-    def increment(self, key, value) -> Self:
-        self.append(value)
-        return self
+def is_primitive(v):
+    return isinstance(v, str) or isinstance(v, int) or isinstance(v, float) or isinstance(v, bool) or v is None
 
 
-class TrackedDict(UserDict):
-    def __init__(self):
-        super().__init__()
-        self.total_additions = 0
-        self.total_overwrites = 0
+def is_container(v):
+    return isinstance(v, list) or isinstance(v, dict)
 
-    def __setitem__(self, key, value):
-        value = transform_json_to_tracked(value)
-        if key not in self.data:
-            self.total_additions += 1
-            self.data[key] = value
+
+@auto_str
+class TrackedObject:
+    def __init__(self, path="/"):
+        self.path = path
+        self.value_list = []
+        self.conflict_count = 0  # existing field counter
+        self.endorse_count = 0  # new field counter
+
+    def increment(self, v):
+        if isinstance(v, dict):
+            for k, v in v.items():
+                self.endorse(k, v)
             return
 
-        # if this is a tracked entry, increment by the new value
-        self.total_overwrites += 1
-        self.data[key].increment(key, value)
+        self.endorse_count += 1
+        self.value_list.append(v)
 
-    def __str__(self) -> str:
-        return f"TrackedDict {self.data}"
+    def endorse(self, k, v):
+        if hasattr(self, k):
+            getattr(self, k).increment(v)
+            self.conflict_count += 1
+            return
 
-    def __repr__(self):
-        return str(self)
-
-    def increment(self, key, value) -> Self:
-        self[key] = value
-        return self
+        self.endorse_count += 1
+        setattr(self, k, TrackedObject(os.path.join(self.path, k)))
+        getattr(self, k).increment(v)
 
 
-GLOBAL_MODEL: TrackedDict[str, ...] = TrackedDict()
+GLOBAL_MODEL: TrackedObject = TrackedObject()
 
 
 def handle_json_dump_object(o: dict) -> None:
     global GLOBAL_MODEL
     for k, v in o.items():
-        GLOBAL_MODEL[k] = v
+        GLOBAL_MODEL.endorse(k, v)
 
 
 def read_jobj_incrementally(f: TextIO) -> str | None:
@@ -143,10 +112,10 @@ def read_jobj_incrementally(f: TextIO) -> str | None:
 
 
 if __name__ == "__main__":
+    # TODO add --from-dump <input-file>
+    # TODO add --from-array <input-file>
     with open(argv[1], "r") as fj_dump:
         while jobj := read_jobj_incrementally(fj_dump):
             handle_json_dump_object(json.loads(jobj))
 
     print(GLOBAL_MODEL)
-    print(GLOBAL_MODEL.total_additions)
-    print(GLOBAL_MODEL.total_overwrites)

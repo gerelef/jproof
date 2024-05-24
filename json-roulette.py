@@ -84,7 +84,7 @@ item_generators: list[Callable] = [
     partial(generate_random_int, None, 100),
     partial(generate_random_string, None, 35),
     partial(create_random_array, None, None, random.randint(20, 45)),
-    partial(create_random_object, None, random.randint(3, 8))
+    partial(create_random_object, None, random.randint(1, 3))
 ]
 
 sys.setrecursionlimit(100_000)
