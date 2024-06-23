@@ -6,6 +6,23 @@ import sys
 from functools import partial
 from typing import Callable
 
+# TODO: improve json-roulette
+#  - --size number of items to output
+#  - --object [--flat] }
+#  - --array  [--flat] } one of these two must exist
+#  - --word-file : newline separated file with words to choose from
+#  - --words (optional argument: sample size of words from file)
+#  - --nested-chance (optional argument: chance of each composite type being nested [0.0, 1.0])
+#  - --nested-max-depth (optional argument: by default 999)
+#  - --randomly-sized-composites=low,high (optional argument: will make composite types' length be within the specified range, inclusive)
+#  - --array-of (optional argument: dump everything as array-of <thing>) instead of objects separated w/ newlines
+
+words = []
+with open("./resources/words", "r") as dictionary:
+    for line in dictionary:
+        words.append(line.strip())
+    words = tuple(sorted(random.choices(words, k=50)))
+
 
 def field_roulette(json: dict) -> bool:
     """
@@ -70,7 +87,7 @@ def create_random_object(lower: int | None, upper: int) -> dict | None:
     final_length = random.randint(lower, upper)
     keys = []
     for _ in range(final_length):
-        keys.append(generate_random_string(1, 6))
+        keys.append(random.choice(words))
     out = {k: random.choice(generators)() for k in keys}
     for _ in range(final_length):
         if field_roulette(out):

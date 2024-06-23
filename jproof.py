@@ -7,30 +7,51 @@ from typing import TextIO, Any, Self
 type Key = str
 type JsonArray = list
 type JsonObject = dict
-type Composite = JsonObject | JsonArray
+type Composite = JsonObject | JsonArray | Node
 type Primitive = str | int | float | bool | None
 
 
-def auto_str(cls):
-    """Automatically implements __str__ for any class."""
+def http_import(url, sha256sum) -> [object, str]:
+    """
+    Load single-file lib from the web.
+    :returns: types.ModuleType, filename
+    """
 
-    def __str__(self):
-        return '%s%s(%s)' % (
-            type(self).__name__,
-            f"@{id(self)}",
-            f','.join('%s=%s' % item for item in vars(self).items())
-        )
+    class HashMismatchException(Exception):
+        pass
 
-    cls.__str__ = __str__
-    cls.__repr__ = __str__
-    return cls
+    class NoSha256DigestProvided(Exception):
+        pass
+
+    if sha256sum is None:
+        raise NoSha256DigestProvided()
+    import os
+    import types
+    import hashlib
+    import urllib.request
+    import urllib.parse
+    code = urllib.request.urlopen(url).read()
+    digest = hashlib.sha256(code, usedforsecurity=True).hexdigest()
+    if digest == sha256sum:
+        filename = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+        module = types.ModuleType(filename)
+        exec(code, module.__dict__)
+        return module, filename
+    raise HashMismatchException(f"SHA256 DIGEST MISMATCH:\n\tEXPECTED: {sha256sum}\n\tACTUAL: {digest}")
 
 
-@auto_str
+utils, _ = http_import(
+    "https://raw.githubusercontent.com/gerelef/dotfiles/main/scripts/utils/modules/helpers.py",
+    "a3f50fac78f2dc71f5c4541f29837c8c8a7595190f3c328a6f26db6bd786b6f1"
+)
+
+
+@utils.auto_str
 class Node:
     def __init__(self, path: list = None):
         self.path = path if path else []
         self.keyed_data: dict[Key, list[Primitive | Composite]] = {}
+        self.keyed_telemetry = {}
         self.total_endorsements = 0
 
     def _create_node(self, k: Key, o: ...) -> Self | ...:
@@ -42,7 +63,7 @@ class Node:
         jobj.endorse_jobj(o)
         return jobj
 
-    def endorse_jobj(self, jobj: JsonObject):
+    def endorse_jobj(self, jobj: JsonObject | dict) -> Self:
         self.total_endorsements += 1
         for k, v in jobj.items():
             if k not in self.keyed_data:
@@ -51,8 +72,10 @@ class Node:
 
             self.keyed_data[k].append(self._create_node(k, v))
 
+        return self
+
     def _aggragate_field_types(self) -> dict[str, str | list[str] | dict]:
-        schema = {"type": translate_to_primitive_schema_type(self), "properties": {}}
+        schema = {"type": translate_to_primitive_schema_type(self)}
         property_types = {}
         for key, values in self.keyed_data.items():
             property_types[key] = []
@@ -61,11 +84,41 @@ class Node:
                 property_types[key].append(translate_to_primitive_schema_type(item))
 
         if len(property_types.keys()) > 0:
-            for key, _ in self.keyed_data.items():
-                schema["properties"] = schema["properties"] | {key: {"type": list(set(property_types[key]))}}
+            schema["properties"] = {}
+            for key, value in property_types.items():
+                jtype = list(set(value))
+                final_jtype = {"type": jtype}
+                field_has_own_properties = "object" in jtype if JOBJECT_SUPERSEDES_PRIMITIVES else len(jtype) == 1 and jtype[0] == "object"
+                if field_has_own_properties:
+                    reference = None
+                    for v in self.keyed_data[key]:
+                        if isinstance(v, Node):
+                            reference = v
+                    final_jtype = reference.schema()
+
+                schema["properties"] = schema["properties"] | {key: final_jtype}
         return schema
 
     def schema(self) -> dict:
+        # TODO: calculate telemetry for each field in our jobject
+        #  - sort the properties by key name
+        #  - track in COMPARISON to EACH jobject endorsed, how many times that field existed, keep percentage in the end (0.0, 1.0]
+        #  - --from-jdump  (load from raw dump of json objects)
+        #  - --from-jarray (load from a json array)
+        #  - --title (optional argument)
+        #  - --description (optional argument)
+        #  - --tolerance (optional argument: include fields that were not seen % of the time [0.0, 1.0], by default 0.0; prunes everything that's not everywhere)
+        #  - --jobjects-supersede-primitives (optional flag: sets JOBJECT_SUPERSEDES_PRIMITIVES)
+        #  - --jarrays-supersede-primitives (optional flag: sets JOBJECT_SUPERSEDES_PRIMITIVES)
+        #  - --requireds (optional flag: add a "required" field to each jobject that has required properties)
+        #  - --prompt-for-property-description (optional argument: prompt for property description when building final schema)
+        #  - add $schema schema keyword draft of JSON Schema standard the schema adheres to
+        #  - add $id schema keyword from filename we're loading
+        #  - --constraints (optional flag: automatically deduce minimum/maximum constraints for each primitive)
+        #      https://json-schema.org/learn/getting-started-step-by-step#define-properties
+        #  - --output (optional argument: dump as file w/ filename provided, extension will be .schema.json) }
+        #  - --silent (optional argument: do not echo schema to stdout)                                      } mutually inclusive arguments, if --silent is set, --output must be set!
+
         return self._aggragate_field_types()
 
 
@@ -135,6 +188,9 @@ def read_jobj_incrementally(f: TextIO) -> str | None:
     return entity
 
 
+JOBJECT_SUPERSEDES_PRIMITIVES = True
+
+
 if __name__ == "__main__":
     # TODO add --from-dump <input-file>
     # TODO add --from-array <input-file>
@@ -144,4 +200,4 @@ if __name__ == "__main__":
             model.endorse_jobj(json.loads(jobj))
 
     print(model)
-    print(model.schema())
+    print(json.dumps(model.schema(), indent=4))
