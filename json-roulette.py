@@ -1,27 +1,20 @@
 #!/usr/bin/env python3.12
+import argparse
 import json
 import random
 import string
 import sys
-from functools import partial
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
-# TODO: improve json-roulette
-#  - --size number of items to output
-#  - --object [--flat] }
-#  - --array  [--flat] } one of these two must exist
-#  - --word-file : newline separated file with words to choose from
-#  - --words (optional argument: sample size of words from file)
-#  - --nested-chance (optional argument: chance of each composite type being nested [0.0, 1.0])
-#  - --nested-max-depth (optional argument: by default 999)
-#  - --randomly-sized-composites=low,high (optional argument: will make composite types' length be within the specified range, inclusive)
-#  - --array-of (optional argument: dump everything as array-of <thing>) instead of objects separated w/ newlines
 
-words = []
-with open("./resources/words", "r") as dictionary:
-    for line in dictionary:
-        words.append(line.strip())
-    words = tuple(sorted(random.choices(words, k=50)))
+def decide(percentage: float) -> bool:
+    """
+    :param percentage: percentage <= 1.0
+    """
+    assert percentage <= 1.0
+    return round(random.uniform(0, 1), 3) <= percentage
 
 
 def field_roulette(json: dict) -> bool:
@@ -38,77 +31,157 @@ def field_roulette(json: dict) -> bool:
     return edit_field
 
 
-def generate_random_string(lower: int | None, upper: int) -> str | None:
-    # if lower bound is None, w/ a 1 in 10 chance return null
-    if not lower and random.randint(1, 25) == 1:
+def generate_random_string(nullable=False) -> str | None:
+    # 1 in 10 chance return null
+    if nullable and decide(0.1):
         return None
-    lower = lower if lower else 0
-    return "".join(random.choices(string.ascii_letters, k=random.randint(lower, upper)))
+    return "".join(random.choices(string.ascii_letters, k=random.randint(1, 5)))
 
 
-def generate_random_int(lower: int | None, upper: int) -> int | None:
-    # if lower bound is None, w/ a 1 in 10 chance return null
-    if not lower and random.randint(1, 25) == 1:
+def generate_random_int(nullable=False) -> int | None:
+    # 1 in 10 chance return null
+    if nullable and decide(0.1):
         return None
-    lower = lower if lower else 0
-    return random.randint(lower, upper)
+    return random.randint(-999, 10000)
 
 
-def generate_random_double(lower: float | None, upper: float) -> float | None:
-    # if lower bound is None, w/ a 1 in 10 chance return null
-    if not lower and random.randint(1, 25) == 1:
+def generate_random_double(nullable=False) -> float | None:
+    # 1 in 10 chance return null
+    if nullable and decide(0.1):
         return None
-    lower = lower if lower else 0
-    return random.uniform(lower, upper)
+    return random.uniform(-1000, 1000)
 
 
-def generate_random_bool(nullable: bool | None) -> bool | None:
-    if (nullable is None or nullable) and random.randint(1, 25) == 1:
+def generate_random_bool(nullable=False) -> bool | None:
+    # 1 in 10 chance return null
+    if nullable and decide(0.1):
         return None
-    return random.randint(1, 2) == 1
+    return decide(random.uniform(0.2, 0.8))
 
 
-def create_random_array(uniform: bool | None, lower: int | None, upper: int) -> list[...] | None:
-    uniform = uniform if uniform is not None else generate_random_bool(False)
-    if not lower and random.randint(1, 25) == 1:
-        return None
-    generators = [random.choice(item_generators)] if uniform else random.choices(item_generators, k=random.randint(2,
-                                                                                                                   len(item_generators)))
-    lower = lower if lower else 0
-    final_length = random.randint(lower, upper)
-    return [random.choice(generators)() for _ in range(final_length)]
+def generate_random_jfield(*primitive_generators: Callable[[], object]) -> tuple[str, ...]:
+    return random.choice(words), random.choice(primitive_generators)()
 
 
-def create_random_object(lower: int | None, upper: int) -> dict | None:
-    if not lower and random.randint(1, 25) == 1:
-        return None
-    generators = random.choices(item_generators, k=random.randint(1, len(item_generators)))
-    lower = lower if lower else 0
-    final_length = random.randint(lower, upper)
-    keys = []
-    for _ in range(final_length):
-        keys.append(random.choice(words))
-    out = {k: random.choice(generators)() for k in keys}
-    for _ in range(final_length):
-        if field_roulette(out):
-            out[generate_random_string(3, 7)] = random.choice(generators)()
+def generate_jobj(
+        current_depth: int,
+        length_low: int,
+        length_high: int,
+        nested_chance: float,
+        nested_max_depth: int) -> dict:
+    out = {}
+    jobj_length = random.randint(length_low, length_high)
+    for i in range(jobj_length):
+        key, value = generate_random_jfield(
+            generate_random_string,
+            generate_random_int,
+            generate_random_double,
+            generate_random_bool
+        )
+        if current_depth < nested_max_depth and decide(nested_chance):
+            key = random.choice(words)
+            value = generate_jobj(
+                current_depth + 1,
+                length_low,
+                length_high,
+                nested_chance,
+                nested_max_depth
+            )
+        out[key] = value
     return out
 
 
-item_generators: list[Callable] = [
-    partial(generate_random_bool, None),
-    partial(generate_random_double, None, 1000),
-    partial(generate_random_int, None, 100),
-    partial(generate_random_string, None, 35),
-    partial(create_random_array, None, None, random.randint(20, 45)),
-    partial(create_random_object, None, 2)
-]
+def generate_jarr(
+        current_depth: int,
+        length_low: int,
+        length_high: int,
+        nested_chance: float,
+        nested_max_depth: int) -> dict:
+    raise NotImplementedError()
 
-sys.setrecursionlimit(100_000)
 
-for _ in range(500):
-    # bored, don't want to fix
-    try:
-        print(json.dumps(create_random_object(2, 4)))
-    except RecursionError as ignored:
-        continue
+@dataclass
+class UserOptions:
+    # --size
+    output_size: int
+    composites_size_low: int
+    composites_size_high: int
+    # --object
+    # --array
+    output_is_jobject_else_array: bool  # True means generate json objects, otherwise generate arrays
+    # --word-file
+    path_to_word_file: Path
+    # --word-sample-size
+    word_sample_size: int
+    # --nested-chance
+    # --flat is this thing but 0.0
+    nested_chance: float
+    # --nested-max-depth
+    nested_max_depth: int
+    # --pretty
+    pretty: bool
+
+
+def _parse_args(args) -> UserOptions:
+    parser = argparse.ArgumentParser(description="json-roulette: a barebones json generator, for testing")
+    parser.add_argument("--size", type=int, required=True)
+    # group = parser.add_mutually_exclusive_group(required=True)
+    # disabled until further notice
+    # group.add_argument("--objects", default=False, action="store_true")
+    # group.add_argument("--arrays", default=False, action="store_true")
+    parser.add_argument("--composites-size-low", type=int, required=True)
+    parser.add_argument("--composites-size-high", type=int, required=True)
+    # optionals
+    parser.add_argument("--word-file", type=str, default="./resources/words", required=False)
+    parser.add_argument("--word-sample-size", type=int, default=50, required=False)
+    nested_flags_group = parser.add_mutually_exclusive_group(required=False)
+    nested_flags_group.add_argument("--flat", default=False, action="store_true", required=False)
+    nested_flags_group.add_argument("--nested-chance", type=float, default=0.2, required=False)
+    parser.add_argument("--nested-max-depth", type=int, default=9999, required=False)
+    parser.add_argument("--pretty", default=False, action="store_true", required=False)
+    options = parser.parse_args(args)
+    assert 1 <= options.size
+    assert 1 <= options.composites_size_low <= options.composites_size_high
+    assert 1 <= options.word_sample_size
+    assert 0.0 <= options.nested_chance <= 1.0
+    assert 1 <= options.nested_max_depth
+    return UserOptions(
+        output_is_jobject_else_array=True,
+        # disabled until further notice
+        # output_is_jobject_else_array=options.objects,
+        output_size=options.size,
+        composites_size_low=options.composites_size_low,
+        composites_size_high=options.composites_size_high,
+        path_to_word_file=Path(options.word_file).expanduser().absolute(),
+        word_sample_size=options.word_sample_size,
+        nested_chance=-1 if options.flat else options.nested_chance,
+        nested_max_depth=1 if options.flat else options.nested_max_depth,
+        pretty=options.pretty
+    )
+
+
+words = []
+if __name__ == "__main__":
+    random.seed(1337)
+    sys.setrecursionlimit(100_000)
+    options = _parse_args(sys.argv[1:])
+    with open(options.path_to_word_file, "r") as dictionary:
+        for line in dictionary:
+            words.append(line.strip())
+        words = tuple(sorted(random.choices(words, k=options.word_sample_size)))
+
+    for i in range(options.output_size):
+        generated = generate_jobj(
+            0,
+            options.composites_size_low,
+            options.composites_size_high,
+            options.nested_chance,
+            options.nested_max_depth
+        ) if options.output_is_jobject_else_array else generate_jarr(
+            0,
+            options.composites_size_low,
+            options.composites_size_high,
+            options.nested_chance,
+            options.nested_max_depth
+        )
+        print(json.dumps(generated, indent=4 if options.pretty else None))
