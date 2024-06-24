@@ -4,10 +4,13 @@ import enum
 import json
 import sys
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
 from typing import TextIO, Any, Self
 
+type Node = object
 type Key = str
+type JPathLike = PathLike[str] | str | list[str]
 type JsonPath = str
 type JsonArray = list
 type JsonObject = dict
@@ -55,18 +58,71 @@ class NodePathDoesNotExist(Exception):
 
 
 @utils.auto_str
-class Schema:
+class JPath:
+    ROOT_NOTATION = "$"
+    PATH_SEPARATOR = "."
+    ARRAY_WILDCARD_NOTATION = "[]"
+
+    def __init__(self, path: JPathLike | Self = "$"):
+        raise NotImplementedError()  # TODO implement
+
+    def __eq__(self, other: JPathLike | Self) -> bool:
+        raise NotImplementedError()  # TODO implement
+
+    @property
+    def components(self) -> PathLike | list[str]:
+        raise NotImplementedError()  # TODO implement
+
+    @property
+    def basename(self) -> str:
+        raise NotImplementedError()  # TODO implement
+
+    @property
+    def path(self) -> Self:
+        raise NotImplementedError()  # TODO implement
+
+    @property
+    def depth(self) -> int:
+        raise NotImplementedError()  # TODO implement
+
+    def exists(self, n: Node) -> bool:
+        raise NotImplementedError()  # TODO implement
+
+    def is_primitive(self, n: Node) -> bool:
+        raise NotImplementedError()  # TODO implement
+
+    def is_jobj(self, n: Node) -> bool:
+        raise NotImplementedError()  # TODO implement
+
+    def is_array(self, n: Node) -> bool:
+        raise NotImplementedError()  # TODO implement
+
+    @classmethod
+    def is_valid_jpath(cls, path: JPathLike | Self):
+        raise NotImplementedError()  # TODO implement
+
+
+@utils.auto_str
+class JSchema:
     @dataclass
-    class Metadata:
+    class KeyMetadata:
         key: Key
         types: list[str] | str
         constraints: list | None
         frequency: float  # 0 < hz <= 1.0
 
-    def __init__(self):
-        pass
+    def __init__(self, model: Node):
+        raise NotImplementedError()  # TODO implement
 
 
+# TODO define top-level helper functions is_jobj, is_jarr, is_etc... & is_jprimitive & is_jcomposite as well
+# TODO rename to JAggregator
+# TODO provide ways to access all data sanely w/ BFS (walk)
+#      - BFS should probably return the JPath & the data relevant to the field we're currently walking through
+# TODO support arrays before continuing development! this might backfire
+# TODO move all schema & output-relevant logic from here to JSchema
+# this class must serve the sole & explicit role of collecting the data correctly; this MUST NOT
+#  have any logic regarding types etc; just collect the data sanely (!)
 @utils.auto_str
 class Node:
     PATH_SEPARATOR = "."
@@ -214,6 +270,9 @@ class Node:
             total_endorsements += current_node.total_endorsements
 
         return current_node, current_endorsements, total_endorsements
+
+    def walk(self):
+        raise NotImplementedError()  # TODO implement
 
     def schema(self,
                inclusion_tolerance: float,
