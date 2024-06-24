@@ -1,14 +1,17 @@
 #!/usr/bin/env python3.12
+import argparse
+import enum
 import json
-from pprint import pprint
-from sys import argv
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 from types import NoneType
 from typing import TextIO, Any, Self
 
 type Key = str
 type JsonArray = list
 type JsonObject = dict
-type Composite = JsonObject | JsonArray | Node
+type Composite = JsonObject | JsonArray
 type Primitive = str | int | float | bool | None
 
 
@@ -47,13 +50,56 @@ utils, _ = http_import(
 )
 
 
+class NodePathDoesNotExist(Exception):
+    pass
+
+
 @utils.auto_str
 class Node:
-    def __init__(self, path: list = None):
-        self.path = path if path else []
-        self.keyed_data: dict[Key, list[Primitive | Composite]] = {}
+    PATH_SEPARATOR = "."
+
+    def __init__(self,
+                 inclusion_tolerance: float,
+                 required_tolerance: float,
+                 do_property_description_prompt: bool,
+                 path: Key = "$",
+                 title: str | None = None,
+                 description: str | None = None):
+        self.__path: Key = path
+        self.keyed_data: dict[Key, list[Primitive | Composite | Node]] = {}
         self.keyed_endorsements: dict[Key, int] = {}
         self.total_endorsements = 0
+
+        # user options
+        self.do_property_description_prompt = do_property_description_prompt  # TODO use
+        self.required_tolerance = required_tolerance  # TODO use
+        self.inclusion_tolerance = inclusion_tolerance  # TODO use
+        # user schema options
+        self.schema_title = title
+        self.schema_description = description
+
+    @property
+    def path(self) -> Key:
+        """
+        :return: the current path
+        """
+        return self.__path
+
+    @property
+    def name(self) -> str:
+        return self.path.split(Node.PATH_SEPARATOR)[-1]
+
+    def _key_path(self, k: Key) -> Key:
+        """
+        :return: the absolute path to a key
+        """
+        return Node.PATH_SEPARATOR.join([*self.path.split(Node.PATH_SEPARATOR), k])
+
+    def _relative_path_to_key(self, path: Key) -> Key:
+        """
+        :return: the relative path to a key, from the current node
+        """
+        return path.removeprefix(self.path).removeprefix(Node.PATH_SEPARATOR)
 
     def _increment_endorsement(self, k: Key) -> Self:
         if k not in self.keyed_endorsements:
@@ -68,21 +114,14 @@ class Node:
             return o
 
         o: dict
-        jobj = Node([*self.path, k])
+        jobj = Node(
+            inclusion_tolerance=options.inclusion_tolerance,
+            required_tolerance=options.required_tolerance,
+            do_property_description_prompt=options.do_property_description_prompt,
+            path=self._key_path(k)
+        )
         jobj.endorse_jobj(o)
         return jobj
-
-    def endorse_jobj(self, jobj: JsonObject | dict) -> Self:
-        self.total_endorsements += 1
-        for k, v in jobj.items():
-            self._increment_endorsement(k)
-            if k not in self.keyed_data:
-                self.keyed_data[k] = [self._create_node(k, v)]
-                continue
-
-            self.keyed_data[k].append(self._create_node(k, v))
-
-        return self
 
     def _aggragate_field_types(self) -> dict[str, str | list[str] | dict]:
         schema = {"type": translate_to_primitive_schema_type(self)}
@@ -98,50 +137,96 @@ class Node:
             for key, value in property_types.items():
                 jtype = list(set(value))
                 final_jtype = {"type": jtype}
-                field_has_own_properties = "object" in jtype if JOBJECT_SUPERSEDES_PRIMITIVES else len(jtype) == 1 and jtype[0] == "object"
+                # TODO this is wrong on so many levels
+                #  object definitions/properties can coexist with primitives, so this is redundant & incorrect
+                field_has_own_properties = "object" in jtype if JOBJECT_SUPERSEDES_PRIMITIVES else (
+                        len(jtype) == 1 and jtype[0] == "object"
+                )
                 if field_has_own_properties:
                     reference = None
                     for v in self.keyed_data[key]:
                         if isinstance(v, Node):
                             reference = v
+                            break
                     final_jtype = reference.schema()
 
                 schema["properties"] = schema["properties"] | {key: final_jtype}
         return schema
 
+    def endorse_jobj(self, jobj: JsonObject | dict) -> Self:
+        self.total_endorsements += 1
+        for k, v in jobj.items():
+            self._increment_endorsement(k)
+            to_endorse = self._create_node(k, v)
+
+            if k not in self.keyed_data:
+                self.keyed_data[k] = [to_endorse]
+                continue
+
+            # special case
+            # if we're about to endorse a node, check if it actually exists so no multiple nodes exist as values
+            #  since composites can do their own tracking, we don't have to keep everything about them
+            if isinstance(to_endorse, Node):
+                endorsed_node = list(filter(lambda i: isinstance(i, Node), self.keyed_data[k]))
+                assert len(endorsed_node) <= 1  # sanity
+                if len(endorsed_node) == 1:
+                    endorsed_node[0].endorse_jobj(v)
+                    continue
+            self.keyed_data[k].append(to_endorse)
+
+        return self
+
+    def get_property(self, path: Key) -> tuple[Primitive | Composite | Self, int, int]:
+        """
+        :return: the value & the keyed_endorsements along the way
+        """
+        path = path.removeprefix(Node.PATH_SEPARATOR).removesuffix(Node.PATH_SEPARATOR)
+        current_node = self
+        components_left = current_node._relative_path_to_key(path).split(Node.PATH_SEPARATOR)
+        if components_left[0] not in current_node.keyed_data:
+            raise NodePathDoesNotExist(current_node, components_left)
+
+        current_endorsements = current_node.keyed_endorsements[components_left[0]]
+        total_endorsements = current_node.keyed_endorsements[components_left[0]]
+        while components_left:
+            current_node = current_node.keyed_data[components_left[0]]
+            # if we have to continue from this point forward, get the node (if it exists)
+            if len(components_left) > 1:
+                eligible_node_list = list(filter(lambda i: isinstance(i, Node), current_node))
+                if not eligible_node_list:
+                    raise NodePathDoesNotExist(current_node, components_left[1:])
+
+                assert len(eligible_node_list) == 1
+                current_node = eligible_node_list[0]
+            if not isinstance(current_node, Node):
+                return current_node, current_endorsements, total_endorsements
+
+            components_left = current_node._relative_path_to_key(path).split(Node.PATH_SEPARATOR)
+            if components_left[0] not in current_node.keyed_data:
+                raise NodePathDoesNotExist(current_node, components_left)
+
+            current_endorsements += current_node.keyed_endorsements[components_left[0]]
+            total_endorsements += current_node.total_endorsements
+
+        return current_node, current_endorsements, total_endorsements
+
     def schema(self) -> dict:
-        # TODO: calculate telemetry for each field in our jobject
-        #  - sort the properties by key name
-        #  - track in COMPARISON to EACH jobject endorsed, how many times that field existed, keep percentage in the end (0.0, 1.0]
-        #  - --from-jdump  (load from raw dump of json objects)
-        #  - --from-jarray (load from a json array)
-        #  - --title (optional argument)
-        #  - --description (optional argument)
-        #  - --tolerance (optional argument: include fields that were not seen % of the time [0.0, 1.0], by default 0.0; prunes everything that's not everywhere)
-        #  - --jobjects-supersede-primitives (optional flag: sets JOBJECT_SUPERSEDES_PRIMITIVES)
-        #  - --jarrays-supersede-primitives (optional flag: sets JOBJECT_SUPERSEDES_PRIMITIVES)
-        #  - --requireds (optional flag: add a "required" field to each jobject that has required properties)
-        #  - --prompt-for-property-description (optional argument: prompt for property description when building final schema)
-        #  - add $schema schema keyword draft of JSON Schema standard the schema adheres to
-        #  - add $id schema keyword from filename we're loading
+        # TODO:
         #  - --constraints (optional flag: automatically deduce minimum/maximum constraints for each primitive)
         #      https://json-schema.org/learn/getting-started-step-by-step#define-properties
-        #  - --output (optional argument: dump as file w/ filename provided, extension will be .schema.json) }
-        #  - --silent (optional argument: do not echo schema to stdout)                                      } mutually inclusive arguments, if --silent is set, --output must be set!
-
         return self._aggragate_field_types()
 
     def telemetry(self) -> list[tuple[str, int, int, list[Primitive | Composite]]]:
         """
         To get % of times seen, use round((keyed_endorsements/total_endorsements)*100, 0)
-        :return: A list of [path.to.field, keyed_endorsements, total_endorsements, [types]]
+        :return: A path-sorted list of [path.to.field, keyed_endorsements, total_endorsements, [types]]
         """
         data = []
         for k, v in self.keyed_data.items():
             keyed_endorsement = self.keyed_endorsements[k]
 
             data.append((
-                ".".join([*self.path, k]),
+                self._key_path(k),
                 keyed_endorsement,
                 self.total_endorsements,
                 v
@@ -150,8 +235,8 @@ class Node:
             # check for special case: nested endorsements
             nodes_in_values = list(filter(lambda i: isinstance(i, Node), v))
             # data sanity check: this list must never have more than 1 element
-            # TODO reenable when this is not failing: assert len(nodes_in_values) <= 1
-            if len(nodes_in_values) > 1:
+            assert len(nodes_in_values) <= 1
+            if bool(len(nodes_in_values)):
                 nested_telemetry = nodes_in_values[0].telemetry()
                 for nested_record in nested_telemetry:
                     data.append((
@@ -160,7 +245,7 @@ class Node:
                         self.total_endorsements + nested_record[2],
                         nested_record[3]
                     ))
-        return data
+        return list(sorted(data, key=lambda item: item[0]))
 
 
 def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
@@ -168,6 +253,8 @@ def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
         return "null"
     if isinstance(obj, str) or obj is str:
         return "string"
+    if isinstance(obj, bool) or obj is bool:
+        return "boolean"
     if isinstance(obj, float) or obj is float:
         return "number"
     if isinstance(obj, int) or obj is int:
@@ -176,11 +263,10 @@ def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
         return "object"
     if isinstance(obj, list) or obj is list:
         return "array"
-    if isinstance(obj, bool) or obj is bool:
-        return "boolean"
     raise RuntimeError(obj)
 
 
+# TODO rewrite this delusional piece of shit
 def read_jobj_incrementally(f: TextIO) -> str | None:
     """
     :return: a string representation of a json object from file
@@ -229,17 +315,99 @@ def read_jobj_incrementally(f: TextIO) -> str | None:
     return entity
 
 
+class JsonConstraints(enum.Enum):
+    @classmethod
+    def from_string(cls, s: str) -> Self:
+        raise NotImplementedError()
+
+
+@dataclass
+class UserOptions:
+    # --from-jdump <filename>
+    # --from-jarray <filename>
+    input_file: Path
+    input_is_jobj_dump_or_array: bool
+    # --title <title str>
+    title: str
+    # --description <description str>
+    description: str
+    # --tolerance <tolerance> 0 < tolerance <= 1
+    #   the higher this number is, the more things that will be included
+    inclusion_tolerance: float
+    # --required <tolerance>
+    #   the higher this number is, the more things that will be included
+    #   can be negative (no required)
+    required_tolerance: float
+    # --prompt-for-description
+    do_property_description_prompt: bool
+    # TODO enable when work is starting on constraints
+    # --constraints type1,type2,...
+    #   OPTIONAL: set to empty list by default
+    # --output
+    #   OPTIONAL
+    #   use this argument with - for stdout to echo to stdout
+    #   use this argument with /dev/null to silence completely (wtf)
+    output: Path | None
+
+
+def _parse_args(args) -> UserOptions:
+    parser = argparse.ArgumentParser(description="json-roulette: a barebones json generator, for testing")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--from-jdump", type=str, default=None)
+    group.add_argument("--from-jarray", type=str, default=None)
+    parser.add_argument("--title", type=str, default="JSON Dump", required=False)
+    parser.add_argument("--description", type=str, default="JSON Schema from a dump.", required=False)
+    parser.add_argument("--tolerance", type=float, default=1.0, required=False)
+    parser.add_argument("--required-tolerance", type=float, default=0.0, required=False)
+    parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
+    parser.add_argument("--output", type=str, default=None, required=False)
+    options = parser.parse_args(args)
+    input_file = Path(options.from_jdump).expanduser() if options.from_jdump else None
+    input_file = Path(options.from_jarray).expanduser() if options.from_jarray else input_file
+    assert 0 < options.tolerance <= 1.0
+    assert 0 <= options.required_tolerance <= 1.0
+    return UserOptions(
+        input_file=input_file,
+        input_is_jobj_dump_or_array=bool(options.from_jdump),
+        title=options.title,
+        description=options.description,
+        inclusion_tolerance=options.tolerance,
+        required_tolerance=options.required_tolerance,
+        do_property_description_prompt=options.prompt_for_description,
+        output=options.output
+    )
+
+
 JOBJECT_SUPERSEDES_PRIMITIVES = True
 
-
+OUTPUT_FILE = sys.stdout
 if __name__ == "__main__":
-    # TODO add --from-dump <input-file>
-    # TODO add --from-array <input-file>
-    model: Node = Node()  # root model
-    with open(argv[1], "r") as fj_dump:
-        while jobj := read_jobj_incrementally(fj_dump):
-            model.endorse_jobj(json.loads(jobj))
+    options = _parse_args(sys.argv[1:])
+    try:
+        OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
 
-    print(model)
-    print(pprint(model.telemetry()))
-    # print(json.dumps(model.schema(), indent=4))
+        # root model
+        model: Node = Node(
+            inclusion_tolerance=options.inclusion_tolerance,
+            required_tolerance=options.required_tolerance,
+            do_property_description_prompt=options.do_property_description_prompt,
+            title=options.title,
+            description=options.description
+        )
+
+        with open(options.input_file, "r") as fj_dump:
+            while jobj := read_jobj_incrementally(fj_dump):
+                model.endorse_jobj(json.loads(jobj))
+
+        print(model, file=OUTPUT_FILE)
+        for r in model.telemetry():
+            path, field_endorsements, total_endorsements, _ = r
+            print(
+                f"{path} was seen {round((field_endorsements / total_endorsements) * 100, 1)}% of the time.",
+                file=OUTPUT_FILE
+            )
+
+        print(json.dumps(model.schema(), indent=4), file=OUTPUT_FILE)
+        print(model.get_property("$.peroxidizing.gorilla.osteoclasis.very_nice"))
+    finally:
+        OUTPUT_FILE.close()
