@@ -5,10 +5,10 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import NoneType
 from typing import TextIO, Any, Self
 
 type Key = str
+type JsonPath = str
 type JsonArray = list
 type JsonObject = dict
 type Composite = JsonObject | JsonArray
@@ -55,31 +55,30 @@ class NodePathDoesNotExist(Exception):
 
 
 @utils.auto_str
+class Schema:
+    @dataclass
+    class Metadata:
+        key: Key
+        types: list[str] | str
+        constraints: list | None
+        frequency: float  # 0 < hz <= 1.0
+
+    def __init__(self):
+        pass
+
+
+@utils.auto_str
 class Node:
     PATH_SEPARATOR = "."
 
-    def __init__(self,
-                 inclusion_tolerance: float,
-                 required_tolerance: float,
-                 do_property_description_prompt: bool,
-                 path: Key = "$",
-                 title: str | None = None,
-                 description: str | None = None):
-        self.__path: Key = path
+    def __init__(self, path: JsonPath = "$"):
+        self.__path: JsonPath = path
         self.keyed_data: dict[Key, list[Primitive | Composite | Node]] = {}
         self.keyed_endorsements: dict[Key, int] = {}
         self.total_endorsements = 0
 
-        # user options
-        self.do_property_description_prompt = do_property_description_prompt  # TODO use
-        self.required_tolerance = required_tolerance  # TODO use
-        self.inclusion_tolerance = inclusion_tolerance  # TODO use
-        # user schema options
-        self.schema_title = title
-        self.schema_description = description
-
     @property
-    def path(self) -> Key:
+    def path(self) -> JsonPath:
         """
         :return: the current path
         """
@@ -89,13 +88,13 @@ class Node:
     def name(self) -> str:
         return self.path.split(Node.PATH_SEPARATOR)[-1]
 
-    def _key_path(self, k: Key) -> Key:
+    def abs_path(self, k: Key) -> JsonPath:
         """
         :return: the absolute path to a key
         """
         return Node.PATH_SEPARATOR.join([*self.path.split(Node.PATH_SEPARATOR), k])
 
-    def _relative_path_to_key(self, path: Key) -> Key:
+    def rel_path(self, path: Key) -> JsonPath:
         """
         :return: the relative path to a key, from the current node
         """
@@ -118,12 +117,17 @@ class Node:
             inclusion_tolerance=options.inclusion_tolerance,
             required_tolerance=options.required_tolerance,
             do_property_description_prompt=options.do_property_description_prompt,
-            path=self._key_path(k)
+            path=self.abs_path(k)
         )
         jobj.endorse_jobj(o)
         return jobj
 
-    def _aggragate_field_types(self) -> dict[str, str | list[str] | dict]:
+    def _aggragate_field_types(self,
+                               inclusion_tolerance: float,
+                               required_tolerance: float,
+                               do_property_description_prompt: bool,
+                               title: str | None = None,
+                               description: str | None = None) -> dict[str, str | list[str] | dict]:
         schema = {"type": translate_to_primitive_schema_type(self)}
         property_types = {}
         for key, values in self.keyed_data.items():
@@ -148,7 +152,13 @@ class Node:
                         if isinstance(v, Node):
                             reference = v
                             break
-                    final_jtype = reference.schema()
+                    final_jtype = reference.schema(
+                        inclusion_tolerance,
+                        required_tolerance,
+                        do_property_description_prompt,
+                        title,
+                        description,
+                    )
 
                 schema["properties"] = schema["properties"] | {key: final_jtype}
         return schema
@@ -176,13 +186,13 @@ class Node:
 
         return self
 
-    def get_property(self, path: Key) -> tuple[Primitive | Composite | Self, int, int]:
+    def get_property(self, path: JsonPath) -> tuple[Primitive | Composite | Self, int, int]:
         """
         :return: the value & the keyed_endorsements along the way
         """
         path = path.removeprefix(Node.PATH_SEPARATOR).removesuffix(Node.PATH_SEPARATOR)
         current_node = self
-        components_left = current_node._relative_path_to_key(path).split(Node.PATH_SEPARATOR)
+        components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
         if components_left[0] not in current_node.keyed_data:
             raise NodePathDoesNotExist(current_node, components_left)
 
@@ -201,7 +211,7 @@ class Node:
             if not isinstance(current_node, Node):
                 return current_node, current_endorsements, total_endorsements
 
-            components_left = current_node._relative_path_to_key(path).split(Node.PATH_SEPARATOR)
+            components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
             if components_left[0] not in current_node.keyed_data:
                 raise NodePathDoesNotExist(current_node, components_left)
 
@@ -210,11 +220,19 @@ class Node:
 
         return current_node, current_endorsements, total_endorsements
 
-    def schema(self) -> dict:
-        # TODO:
-        #  - --constraints (optional flag: automatically deduce minimum/maximum constraints for each primitive)
-        #      https://json-schema.org/learn/getting-started-step-by-step#define-properties
-        return self._aggragate_field_types()
+    def schema(self,
+               inclusion_tolerance: float,
+               required_tolerance: float,
+               do_property_description_prompt: bool,
+               title: str | None = None,
+               description: str | None = None) -> dict:
+        return self._aggragate_field_types(
+            inclusion_tolerance,
+            required_tolerance,
+            do_property_description_prompt,
+            title,
+            description,
+        )
 
     def telemetry(self) -> list[tuple[str, int, int, list[Primitive | Composite]]]:
         """
@@ -226,7 +244,7 @@ class Node:
             keyed_endorsement = self.keyed_endorsements[k]
 
             data.append((
-                self._key_path(k),
+                self.abs_path(k),
                 keyed_endorsement,
                 self.total_endorsements,
                 v
@@ -249,19 +267,19 @@ class Node:
 
 
 def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
-    if obj is None or obj is type(NoneType):
+    if obj is None:
         return "null"
-    if isinstance(obj, str) or obj is str:
+    if isinstance(obj, str):
         return "string"
-    if isinstance(obj, bool) or obj is bool:
+    if isinstance(obj, bool):
         return "boolean"
-    if isinstance(obj, float) or obj is float:
-        return "number"
-    if isinstance(obj, int) or obj is int:
+    if isinstance(obj, int):
         return "integer"
-    if isinstance(obj, dict) or isinstance(obj, Node) or obj is dict:
+    if isinstance(obj, float):
+        return "number"
+    if isinstance(obj, dict):
         return "object"
-    if isinstance(obj, list) or obj is list:
+    if isinstance(obj, list):
         return "array"
     raise RuntimeError(obj)
 
@@ -387,14 +405,7 @@ if __name__ == "__main__":
         OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
 
         # root model
-        model: Node = Node(
-            inclusion_tolerance=options.inclusion_tolerance,
-            required_tolerance=options.required_tolerance,
-            do_property_description_prompt=options.do_property_description_prompt,
-            title=options.title,
-            description=options.description
-        )
-
+        model: Node = Node()
         with open(options.input_file, "r") as fj_dump:
             while jobj := read_jobj_incrementally(fj_dump):
                 model.endorse_jobj(json.loads(jobj))
@@ -407,7 +418,19 @@ if __name__ == "__main__":
                 file=OUTPUT_FILE
             )
 
-        print(json.dumps(model.schema(), indent=4), file=OUTPUT_FILE)
-        print(model.get_property("$.peroxidizing.gorilla.osteoclasis.very_nice"))
+        print(
+            json.dumps(
+                model.schema(
+                    inclusion_tolerance=options.inclusion_tolerance,
+                    required_tolerance=options.required_tolerance,
+                    do_property_description_prompt=options.do_property_description_prompt,
+                    title=options.title,
+                    description=options.description
+                ),
+                indent=4
+            ), file=OUTPUT_FILE
+        )
+        print(model.get_property(
+            "$.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.plumery"))
     finally:
         OUTPUT_FILE.close()
