@@ -1,5 +1,6 @@
 #!/usr/bin/env python3.12
 import json
+from pprint import pprint
 from sys import argv
 from types import NoneType
 from typing import TextIO, Any, Self
@@ -51,8 +52,16 @@ class Node:
     def __init__(self, path: list = None):
         self.path = path if path else []
         self.keyed_data: dict[Key, list[Primitive | Composite]] = {}
-        self.keyed_telemetry = {}
+        self.keyed_endorsements: dict[Key, int] = {}
         self.total_endorsements = 0
+
+    def _increment_endorsement(self, k: Key) -> Self:
+        if k not in self.keyed_endorsements:
+            self.keyed_endorsements[k] = 1
+            return self
+
+        self.keyed_endorsements[k] += 1
+        return self
 
     def _create_node(self, k: Key, o: ...) -> Self | ...:
         if not isinstance(o, dict):
@@ -66,6 +75,7 @@ class Node:
     def endorse_jobj(self, jobj: JsonObject | dict) -> Self:
         self.total_endorsements += 1
         for k, v in jobj.items():
+            self._increment_endorsement(k)
             if k not in self.keyed_data:
                 self.keyed_data[k] = [self._create_node(k, v)]
                 continue
@@ -120,6 +130,37 @@ class Node:
         #  - --silent (optional argument: do not echo schema to stdout)                                      } mutually inclusive arguments, if --silent is set, --output must be set!
 
         return self._aggragate_field_types()
+
+    def telemetry(self) -> list[tuple[str, int, int, list[Primitive | Composite]]]:
+        """
+        To get % of times seen, use round((keyed_endorsements/total_endorsements)*100, 0)
+        :return: A list of [path.to.field, keyed_endorsements, total_endorsements, [types]]
+        """
+        data = []
+        for k, v in self.keyed_data.items():
+            keyed_endorsement = self.keyed_endorsements[k]
+
+            data.append((
+                ".".join([*self.path, k]),
+                keyed_endorsement,
+                self.total_endorsements,
+                v
+            ))
+
+            # check for special case: nested endorsements
+            nodes_in_values = list(filter(lambda i: isinstance(i, Node), v))
+            # data sanity check: this list must never have more than 1 element
+            # TODO reenable when this is not failing: assert len(nodes_in_values) <= 1
+            if len(nodes_in_values) > 1:
+                nested_telemetry = nodes_in_values[0].telemetry()
+                for nested_record in nested_telemetry:
+                    data.append((
+                        nested_record[0],
+                        keyed_endorsement + nested_record[1],
+                        self.total_endorsements + nested_record[2],
+                        nested_record[3]
+                    ))
+        return data
 
 
 def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
@@ -200,4 +241,5 @@ if __name__ == "__main__":
             model.endorse_jobj(json.loads(jobj))
 
     print(model)
-    print(json.dumps(model.schema(), indent=4))
+    print(pprint(model.telemetry()))
+    # print(json.dumps(model.schema(), indent=4))
