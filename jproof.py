@@ -113,12 +113,7 @@ class Node:
             return o
 
         o: dict
-        jobj = Node(
-            inclusion_tolerance=options.inclusion_tolerance,
-            required_tolerance=options.required_tolerance,
-            do_property_description_prompt=options.do_property_description_prompt,
-            path=self.abs_path(k)
-        )
+        jobj = Node(path=self.abs_path(k))
         jobj.endorse_jobj(o)
         return jobj
 
@@ -277,7 +272,7 @@ def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
         return "integer"
     if isinstance(obj, float):
         return "number"
-    if isinstance(obj, dict):
+    if isinstance(obj, (dict, Node)):
         return "object"
     if isinstance(obj, list):
         return "array"
