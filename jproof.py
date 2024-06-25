@@ -3,14 +3,16 @@ import argparse
 import enum
 import json
 import sys
+import types
+from copy import copy
 from dataclasses import dataclass
+from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
-from typing import TextIO, Any, Self
+from typing import TextIO, Self
 
 type Node = object
 type Key = str
-type JPathLike = PathLike[str] | str | list[str]
 type JsonPath = str
 type JsonArray = list
 type JsonObject = dict
@@ -53,8 +55,15 @@ utils, _ = http_import(
 )
 
 
-class NodePathDoesNotExist(Exception):
+class JPathDoesNotExist(Exception):
     pass
+
+
+class JTypeDoesNotExist(Exception):
+    pass
+
+
+type JPathLike = PathLike | list[str] | str
 
 
 @utils.auto_str
@@ -64,18 +73,32 @@ class JPath:
     ARRAY_WILDCARD_NOTATION = "[]"
 
     def __init__(self, path: JPathLike | Self = "$"):
-        raise NotImplementedError()  # TODO implement
+        if isinstance(path, str):
+            path = path.split(JPath.PATH_SEPARATOR)
+        self.__components = path
 
     def __eq__(self, other: JPathLike | Self) -> bool:
-        raise NotImplementedError()  # TODO implement
+        if other is None:
+            return False
+        if not isinstance(other, (PathLike | str | JPath)):
+            return False
+        if not isinstance(other, JPath):
+            other = JPath(other)
+        for sp, op in zip_longest(self.components, other.components):
+            if sp != op:
+                return False
+
+        return True
 
     @property
     def components(self) -> PathLike | list[str]:
-        raise NotImplementedError()  # TODO implement
+        return copy(self.__components)
 
     @property
     def basename(self) -> str:
-        raise NotImplementedError()  # TODO implement
+        if not self.components:
+            raise JPathDoesNotExist()
+        return self.components[-1]
 
     @property
     def path(self) -> Self:
@@ -83,23 +106,7 @@ class JPath:
 
     @property
     def depth(self) -> int:
-        raise NotImplementedError()  # TODO implement
-
-    def exists(self, n: Node) -> bool:
-        raise NotImplementedError()  # TODO implement
-
-    def is_primitive(self, n: Node) -> bool:
-        raise NotImplementedError()  # TODO implement
-
-    def is_jobj(self, n: Node) -> bool:
-        raise NotImplementedError()  # TODO implement
-
-    def is_array(self, n: Node) -> bool:
-        raise NotImplementedError()  # TODO implement
-
-    @classmethod
-    def is_valid_jpath(cls, path: JPathLike | Self):
-        raise NotImplementedError()  # TODO implement
+        return len(self.components)
 
 
 @utils.auto_str
@@ -115,7 +122,6 @@ class JSchema:
         raise NotImplementedError()  # TODO implement
 
 
-# TODO define top-level helper functions is_jobj, is_jarr, is_etc... & is_jprimitive & is_jcomposite as well
 # TODO rename to JAggregator
 # TODO provide ways to access all data sanely w/ BFS (walk)
 #      - BFS should probably return the JPath & the data relevant to the field we're currently walking through
@@ -179,13 +185,13 @@ class Node:
                                do_property_description_prompt: bool,
                                title: str | None = None,
                                description: str | None = None) -> dict[str, str | list[str] | dict]:
-        schema = {"type": translate_to_primitive_schema_type(self)}
+        schema = {"type": str(JType(self))}
         property_types = {}
         for key, values in self.keyed_data.items():
             property_types[key] = []
             values: list
             for item in values:
-                property_types[key].append(translate_to_primitive_schema_type(item))
+                property_types[key].append(str(JType(item)))
 
         if len(property_types.keys()) > 0:
             schema["properties"] = {}
@@ -245,7 +251,7 @@ class Node:
         current_node = self
         components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
         if components_left[0] not in current_node.keyed_data:
-            raise NodePathDoesNotExist(current_node, components_left)
+            raise JPathDoesNotExist(current_node, components_left)
 
         current_endorsements = current_node.keyed_endorsements[components_left[0]]
         total_endorsements = current_node.keyed_endorsements[components_left[0]]
@@ -255,7 +261,7 @@ class Node:
             if len(components_left) > 1:
                 eligible_node_list = list(filter(lambda i: isinstance(i, Node), current_node))
                 if not eligible_node_list:
-                    raise NodePathDoesNotExist(current_node, components_left[1:])
+                    raise JPathDoesNotExist(current_node, components_left[1:])
 
                 assert len(eligible_node_list) == 1
                 current_node = eligible_node_list[0]
@@ -264,7 +270,7 @@ class Node:
 
             components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
             if components_left[0] not in current_node.keyed_data:
-                raise NodePathDoesNotExist(current_node, components_left)
+                raise JPathDoesNotExist(current_node, components_left)
 
             current_endorsements += current_node.keyed_endorsements[components_left[0]]
             total_endorsements += current_node.total_endorsements
@@ -272,6 +278,9 @@ class Node:
         return current_node, current_endorsements, total_endorsements
 
     def walk(self):
+        raise NotImplementedError()  # TODO implement
+
+    def walk_properties(self):
         raise NotImplementedError()  # TODO implement
 
     def schema(self,
@@ -320,22 +329,70 @@ class Node:
         return list(sorted(data, key=lambda item: item[0]))
 
 
-def translate_to_primitive_schema_type(obj: Any | type | None) -> str:
-    if obj is None:
-        return "null"
-    if isinstance(obj, str):
-        return "string"
-    if isinstance(obj, bool):
-        return "boolean"
-    if isinstance(obj, int):
-        return "integer"
-    if isinstance(obj, float):
-        return "number"
-    if isinstance(obj, (dict, Node)):
-        return "object"
-    if isinstance(obj, list):
-        return "array"
-    raise RuntimeError(obj)
+class JType(enum.Enum):
+    NULL = types.NoneType
+    STRING = str
+    BOOLEAN = bool
+    INTEGER = int
+    NUMBER = float
+    OBJECT = dict
+    ARRAY = list
+
+    def is_jobj(self):
+        return self == JType.OBJECT
+
+    def is_jarr(self):
+        return self == JType.ARRAY
+
+    def is_composite(self):
+        return self.is_jobj() or self.is_jarr()
+
+    def is_primitive(self):
+        return not self.is_composite()
+
+    def __str__(self):
+        if self.is_jobj():
+            return "object"
+        if self.is_jarr():
+            return "array"
+
+        # primitive conversions here
+        match self:
+            case JType.NULL:
+                return "null"
+            case JType.STRING:
+                return "string"
+            case JType.BOOLEAN:
+                return "boolean"
+            case JType.INTEGER:
+                return "integer"
+            case JType.NUMBER:
+                return "number"
+
+        raise JTypeDoesNotExist(self.value)
+
+    # use this function because _missing_ and __new__ are two pieces of shit
+    @staticmethod
+    def _new(_, value):
+        if isinstance(value, JType.NULL.value) or value is JType.NULL.value:
+            return JType.NULL
+        if isinstance(value, (JType.OBJECT.value, Node)) or value is JType.OBJECT.value:
+            return JType.OBJECT
+        if isinstance(value, JType.ARRAY.value) or value is JType.ARRAY.value:
+            return JType.ARRAY
+        if isinstance(value, JType.STRING.value) or value is JType.STRING.value:
+            return JType.STRING
+        if isinstance(value, JType.BOOLEAN.value) or value is JType.BOOLEAN.value:
+            return JType.BOOLEAN
+        if isinstance(value, JType.INTEGER.value) or value is JType.INTEGER.value:
+            return JType.INTEGER
+        if isinstance(value, JType.NUMBER.value) or value is JType.NUMBER.value:
+            return JType.NUMBER
+
+        raise JTypeDoesNotExist(value, type(value))
+
+
+JType.__new__ = JType._new
 
 
 # TODO rewrite this delusional piece of shit
@@ -484,6 +541,7 @@ if __name__ == "__main__":
                 indent=4
             ), file=OUTPUT_FILE
         )
+        # noinspection SpellCheckingInspection
         print(model.get_property(
             "$.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.plumery"))
     finally:
