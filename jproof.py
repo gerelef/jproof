@@ -11,14 +11,6 @@ from os import PathLike
 from pathlib import Path
 from typing import TextIO, Self
 
-type Node = object
-type Key = str
-type JsonPath = str
-type JsonArray = list
-type JsonObject = dict
-type Composite = JsonObject | JsonArray
-type Primitive = str | int | float | bool | None
-
 
 def http_import(url, sha256sum) -> [object, str]:
     """
@@ -54,6 +46,14 @@ utils, _ = http_import(
     "a3f50fac78f2dc71f5c4541f29837c8c8a7595190f3c328a6f26db6bd786b6f1"
 )
 
+type Node = object
+type Key = str
+type JsonPath = str
+type JsonArray = list
+type JsonObject = dict
+type Composite = JsonObject | JsonArray
+type Primitive = str | int | float | bool | None
+
 
 class JPathDoesNotExist(Exception):
     pass
@@ -62,6 +62,71 @@ class JPathDoesNotExist(Exception):
 class JTypeDoesNotExist(Exception):
     pass
 
+
+class JType(enum.Enum):
+    NULL = types.NoneType
+    STRING = str
+    BOOLEAN = bool
+    INTEGER = int
+    NUMBER = float
+    OBJECT = dict
+    ARRAY = list
+
+    def is_jobj(self):
+        return self == JType.OBJECT
+
+    def is_jarr(self):
+        return self == JType.ARRAY
+
+    def is_composite(self):
+        return self.is_jobj() or self.is_jarr()
+
+    def is_primitive(self):
+        return not self.is_composite()
+
+    def __str__(self):
+        if self.is_jobj():
+            return "object"
+        if self.is_jarr():
+            return "array"
+
+        # primitive conversions here
+        match self:
+            case JType.NULL:
+                return "null"
+            case JType.STRING:
+                return "string"
+            case JType.BOOLEAN:
+                return "boolean"
+            case JType.INTEGER:
+                return "integer"
+            case JType.NUMBER:
+                return "number"
+
+        raise JTypeDoesNotExist(self.value)
+
+    # use this function because _missing_ and __new__ are two pieces of shit
+    @staticmethod
+    def _new(_, value):
+        if isinstance(value, JType.NULL.value) or value is JType.NULL.value:
+            return JType.NULL
+        if isinstance(value, (JType.OBJECT.value, Node)) or value is JType.OBJECT.value:
+            return JType.OBJECT
+        if isinstance(value, JType.ARRAY.value) or value is JType.ARRAY.value:
+            return JType.ARRAY
+        if isinstance(value, JType.STRING.value) or value is JType.STRING.value:
+            return JType.STRING
+        if isinstance(value, JType.BOOLEAN.value) or value is JType.BOOLEAN.value:
+            return JType.BOOLEAN
+        if isinstance(value, JType.INTEGER.value) or value is JType.INTEGER.value:
+            return JType.INTEGER
+        if isinstance(value, JType.NUMBER.value) or value is JType.NUMBER.value:
+            return JType.NUMBER
+
+        raise JTypeDoesNotExist(value, type(value))
+
+
+JType.__new__ = JType._new
 
 type JPathLike = PathLike | list[str] | str
 
@@ -110,16 +175,61 @@ class JPath:
 
 
 @utils.auto_str
-class JSchema:
-    @dataclass
-    class KeyMetadata:
-        key: Key
-        types: list[str] | str
-        constraints: list | None
-        frequency: float  # 0 < hz <= 1.0
+class JAggregate:
+    def __init__(self, *values: ...):
+        self.__values: list[...] = []
+        self.__types: list[JType] = []
+        self.__total_aggregations: int = 0
+        self.__aggregations_per_type: dict[JType, int] = {}
+        if values:
+            self.aggragate(values)
 
-    def __init__(self, model: Node):
-        raise NotImplementedError()  # TODO implement
+    def __add__(self, other: Self) -> Self:
+        if not isinstance(other, JAggregate):
+            raise TypeError(f"Cannot aggregate different {other} type {type(other)}!")
+
+        # sum the two statistic fields
+        aggregation_sum = {}
+        for k in set(self.__aggregations_per_type) | set(other.__aggregations_per_type):
+            aggregation_sum[k] = self.__aggregations_per_type.get(k, 0) + other.__aggregations_per_type.get(k, 0)
+
+        new_aggregate = JAggregate()
+        new_aggregate.__values = list(set(self.__values + other.__values))
+        new_aggregate.__types = list(set(self.types + other.types))
+        new_aggregate.__aggregations_per_type = aggregation_sum
+        new_aggregate.__total_aggregations = self.__total_aggregations + other.__total_aggregations
+        return new_aggregate
+
+    def __aggregate_jtype(self, jtype: JType):
+        if jtype not in self.__types:
+            self.__types.append(jtype)
+
+        if jtype not in self.__aggregations_per_type:
+            self.__aggregations_per_type[jtype] = 1
+            return
+        self.__aggregations_per_type[jtype] += 1
+
+    @property
+    def types(self) -> list[JType]:
+        return copy(self.__types)
+
+    def statistics(self, jtype: JType) -> float:
+        """
+        Get appearance statistics for a specific jtype.
+        :return: % of appearances
+        """
+        return self.__aggregations_per_type[jtype] / self.__total_aggregations
+
+    def aggragate(self, *values):
+        """
+        Aggregate N valid JType candidates to this container.
+        """
+        if not values:
+            return
+        for v in values:
+            self.__total_aggregations += 1
+            self.__values.append(v)
+            self.__aggregate_jtype(JType(v))
 
 
 # TODO rename to JAggregator
@@ -131,8 +241,6 @@ class JSchema:
 #  have any logic regarding types etc; just collect the data sanely (!)
 @utils.auto_str
 class Node:
-    PATH_SEPARATOR = "."
-
     def __init__(self, path: JsonPath = "$"):
         self.__path: JsonPath = path
         self.keyed_data: dict[Key, list[Primitive | Composite | Node]] = {}
@@ -148,19 +256,19 @@ class Node:
 
     @property
     def name(self) -> str:
-        return self.path.split(Node.PATH_SEPARATOR)[-1]
+        return self.path.split(JPath.PATH_SEPARATOR)[-1]
 
     def abs_path(self, k: Key) -> JsonPath:
         """
         :return: the absolute path to a key
         """
-        return Node.PATH_SEPARATOR.join([*self.path.split(Node.PATH_SEPARATOR), k])
+        return JPath.PATH_SEPARATOR.join([*self.path.split(JPath.PATH_SEPARATOR), k])
 
     def rel_path(self, path: Key) -> JsonPath:
         """
         :return: the relative path to a key, from the current node
         """
-        return path.removeprefix(self.path).removeprefix(Node.PATH_SEPARATOR)
+        return path.removeprefix(self.path).removeprefix(JPath.PATH_SEPARATOR)
 
     def _increment_endorsement(self, k: Key) -> Self:
         if k not in self.keyed_endorsements:
@@ -247,9 +355,9 @@ class Node:
         """
         :return: the value & the keyed_endorsements along the way
         """
-        path = path.removeprefix(Node.PATH_SEPARATOR).removesuffix(Node.PATH_SEPARATOR)
+        path = path.removeprefix(JPath.PATH_SEPARATOR).removesuffix(JPath.PATH_SEPARATOR)
         current_node = self
-        components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
+        components_left = current_node.rel_path(path).split(JPath.PATH_SEPARATOR)
         if components_left[0] not in current_node.keyed_data:
             raise JPathDoesNotExist(current_node, components_left)
 
@@ -268,7 +376,7 @@ class Node:
             if not isinstance(current_node, Node):
                 return current_node, current_endorsements, total_endorsements
 
-            components_left = current_node.rel_path(path).split(Node.PATH_SEPARATOR)
+            components_left = current_node.rel_path(path).split(JPath.PATH_SEPARATOR)
             if components_left[0] not in current_node.keyed_data:
                 raise JPathDoesNotExist(current_node, components_left)
 
@@ -327,72 +435,6 @@ class Node:
                         nested_record[3]
                     ))
         return list(sorted(data, key=lambda item: item[0]))
-
-
-class JType(enum.Enum):
-    NULL = types.NoneType
-    STRING = str
-    BOOLEAN = bool
-    INTEGER = int
-    NUMBER = float
-    OBJECT = dict
-    ARRAY = list
-
-    def is_jobj(self):
-        return self == JType.OBJECT
-
-    def is_jarr(self):
-        return self == JType.ARRAY
-
-    def is_composite(self):
-        return self.is_jobj() or self.is_jarr()
-
-    def is_primitive(self):
-        return not self.is_composite()
-
-    def __str__(self):
-        if self.is_jobj():
-            return "object"
-        if self.is_jarr():
-            return "array"
-
-        # primitive conversions here
-        match self:
-            case JType.NULL:
-                return "null"
-            case JType.STRING:
-                return "string"
-            case JType.BOOLEAN:
-                return "boolean"
-            case JType.INTEGER:
-                return "integer"
-            case JType.NUMBER:
-                return "number"
-
-        raise JTypeDoesNotExist(self.value)
-
-    # use this function because _missing_ and __new__ are two pieces of shit
-    @staticmethod
-    def _new(_, value):
-        if isinstance(value, JType.NULL.value) or value is JType.NULL.value:
-            return JType.NULL
-        if isinstance(value, (JType.OBJECT.value, Node)) or value is JType.OBJECT.value:
-            return JType.OBJECT
-        if isinstance(value, JType.ARRAY.value) or value is JType.ARRAY.value:
-            return JType.ARRAY
-        if isinstance(value, JType.STRING.value) or value is JType.STRING.value:
-            return JType.STRING
-        if isinstance(value, JType.BOOLEAN.value) or value is JType.BOOLEAN.value:
-            return JType.BOOLEAN
-        if isinstance(value, JType.INTEGER.value) or value is JType.INTEGER.value:
-            return JType.INTEGER
-        if isinstance(value, JType.NUMBER.value) or value is JType.NUMBER.value:
-            return JType.NUMBER
-
-        raise JTypeDoesNotExist(value, type(value))
-
-
-JType.__new__ = JType._new
 
 
 # TODO rewrite this delusional piece of shit
