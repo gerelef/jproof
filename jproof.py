@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.12
 import argparse
 import enum
+import functools
 import json
 import sys
 import types
@@ -186,7 +187,7 @@ class JAggregate:
     def __init__(self, *values: ...):
         self.__values: list[...] = []
         self.__types: list[JType] = []
-        self.__total_aggregations: int = 0
+        self.__self_aggregations: int = 0
         self.__aggregations_per_type: dict[JType, int] = {}
         if values:
             self.aggragate(values)
@@ -201,10 +202,10 @@ class JAggregate:
             aggregation_sum[k] = self.__aggregations_per_type.get(k, 0) + other.__aggregations_per_type.get(k, 0)
 
         new_aggregate = JAggregate()
-        new_aggregate.__values = list(set(self.__values + other.__values))
+        new_aggregate.__values = list(set(self.values + other.values))
         new_aggregate.__types = list(set(self.types + other.types))
         new_aggregate.__aggregations_per_type = aggregation_sum
-        new_aggregate.__total_aggregations = self.__total_aggregations + other.__total_aggregations
+        new_aggregate.__self_aggregations = self.__self_aggregations + other.__self_aggregations
         return new_aggregate
 
     def __aggregate_jtype(self, jtype: JType):
@@ -217,15 +218,26 @@ class JAggregate:
         self.__aggregations_per_type[jtype] += 1
 
     @property
+    def values(self):
+        return copy(self.__values)
+
+    @property
     def types(self) -> list[JType]:
         return copy(self.__types)
 
-    def statistics(self, jtype: JType) -> float:
+    @property
+    def aggregations(self) -> int:
+        """
+        :return: the total number of aggregations of any value (self)
+        """
+        return self.__self_aggregations
+
+    def frequency(self, jtype: JType) -> float:
         """
         Get appearance statistics for a specific jtype.
         :return: % of appearances
         """
-        return self.__aggregations_per_type[jtype] / self.__total_aggregations
+        return self.__aggregations_per_type[jtype] / functools.reduce(lambda x, y: x + y, list(self.__aggregations_per_type.values()), 0)
 
     def aggragate(self, *values):
         """
@@ -233,8 +245,8 @@ class JAggregate:
         """
         if not values:
             return
+        self.__self_aggregations += 1
         for v in values:
-            self.__total_aggregations += 1
             self.__values.append(v)
             self.__aggregate_jtype(JType(v))
 
