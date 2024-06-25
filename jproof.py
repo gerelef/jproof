@@ -167,7 +167,14 @@ class JPath:
 
     @property
     def path(self) -> Self:
-        raise NotImplementedError()  # TODO implement
+        return JPath.PATH_SEPARATOR.join(self.components)
+
+    @property
+    def absolute(self):
+        components = self.components
+        if components[0] != JPath.ROOT_NOTATION:
+            components.insert(0, JPath.ROOT_NOTATION)
+        return JPath.PATH_SEPARATOR.join(components)
 
     @property
     def depth(self) -> int:
