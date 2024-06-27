@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
-from typing import TextIO, Self
+from typing import TextIO, Self, Iterator
 
 
 def http_import(url, sha256sum) -> [object, str]:
@@ -109,19 +109,19 @@ class JType(enum.Enum):
     # use this function because _missing_ and __new__ are two pieces of shit
     @staticmethod
     def _new(_, value):
-        if isinstance(value, JType.NULL.value) or value is JType.NULL.value:
+        if isinstance(value, types.NoneType):
             return JType.NULL
-        if isinstance(value, (JType.OBJECT.value, Node)) or value is JType.OBJECT.value:
+        if isinstance(value, (dict, Node)):
             return JType.OBJECT
-        if isinstance(value, JType.ARRAY.value) or value is JType.ARRAY.value:
+        if isinstance(value, list):
             return JType.ARRAY
-        if isinstance(value, JType.STRING.value) or value is JType.STRING.value:
+        if isinstance(value, str):
             return JType.STRING
-        if isinstance(value, JType.BOOLEAN.value) or value is JType.BOOLEAN.value:
+        if isinstance(value, bool):
             return JType.BOOLEAN
-        if isinstance(value, JType.INTEGER.value) or value is JType.INTEGER.value:
+        if isinstance(value, int):
             return JType.INTEGER
-        if isinstance(value, JType.NUMBER.value) or value is JType.NUMBER.value:
+        if isinstance(value, float):
             return JType.NUMBER
 
         raise JTypeDoesNotExist(value, type(value))
@@ -132,16 +132,26 @@ JType.__new__ = JType._new
 type JPathLike = PathLike | list[str] | str
 
 
-@utils.auto_str
 class JPath:
     ROOT_NOTATION = "$"
     PATH_SEPARATOR = "."
     ARRAY_WILDCARD_NOTATION = "[]"
 
-    def __init__(self, path: JPathLike | Self = "$"):
+    def __init__(self, path: JPathLike | Self = None):
+        if path is None:
+            path = [JPath.ROOT_NOTATION]
         if isinstance(path, str):
             path = path.split(JPath.PATH_SEPARATOR)
+        if isinstance(path, JPath):
+            path = path.components
+
+        # this must be true or we have massively fucked up
+        path: list[str]
+        assert isinstance(path, list)
         self.__components = path
+
+    def __str__(self) -> str:
+        return self.path
 
     def __eq__(self, other: JPathLike | Self) -> bool:
         if other is None:
@@ -156,6 +166,14 @@ class JPath:
 
         return True
 
+    def __truediv__(self, other: Self | str | int) -> Self:
+        """
+        :return: A new JPath
+        """
+        if not isinstance(other, JPath):
+            return JPath(path=[*self.components, other])
+        return JPath(path=self.components + other.components)
+
     @property
     def components(self) -> PathLike | list[str]:
         return copy(self.__components)
@@ -166,9 +184,15 @@ class JPath:
             raise JPathDoesNotExist()
         return self.components[-1]
 
+    # TODO this outputs a non-standard way for JsonPath indices: for example, this will currently output $.thing.[0].thing2
     @property
-    def path(self) -> Self:
-        return JPath.PATH_SEPARATOR.join(self.components)
+    def path(self) -> str:
+        # delegate to map
+        def convert_array_indices(element) -> str:
+            if isinstance(element, int):
+                return f"[{element}]"
+            return element
+        return JPath.PATH_SEPARATOR.join(list(map(convert_array_indices, self.components)))
 
     @property
     def absolute(self):
@@ -404,12 +428,6 @@ class Node:
 
         return current_node, current_endorsements, total_endorsements
 
-    def walk(self):
-        raise NotImplementedError()  # TODO implement
-
-    def walk_properties(self):
-        raise NotImplementedError()  # TODO implement
-
     def schema(self,
                inclusion_tolerance: float,
                required_tolerance: float,
@@ -454,6 +472,32 @@ class Node:
                         nested_record[3]
                     ))
         return list(sorted(data, key=lambda item: item[0]))
+
+
+def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | str = None) -> Iterator[tuple[JPath, ...]]:
+    def is_delegate(el: JType.OBJECT.value | JType.ARRAY.value) -> bool:
+        return JType(el).is_composite()
+
+    jtype = JType(jelement)
+    jpath = JPath(root_path)
+    if jtype.is_jobj():
+        for k, v in jelement.items():
+            if is_delegate(v):
+                yield from walk(v, root_path=jpath / k)
+                continue
+            yield jpath / k, v
+        return
+
+    if jtype.is_jarr():
+        for i in range(len(jelement)):
+            v = jelement[i]
+            if is_delegate(v):
+                yield from walk(v, root_path=jpath / i)
+                continue
+            yield jpath / i, v
+        return
+
+    raise JTypeDoesNotExist(f"Invalid root jelement {jelement} type {jtype}")
 
 
 # TODO rewrite this delusional piece of shit
@@ -505,10 +549,48 @@ def read_jobj_incrementally(f: TextIO) -> str | None:
     return entity
 
 
-class JsonConstraints(enum.Enum):
-    @classmethod
-    def from_string(cls, s: str) -> Self:
-        raise NotImplementedError()
+def main(options) -> None:
+    global OUTPUT_FILE
+    try:
+        OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
+
+        with open(options.input_file, "r") as fj_dump:
+            while jobj := read_jobj_incrementally(fj_dump):
+                for tup in walk(json.loads(jobj)):
+                    jpath, *vals = tup
+                    print(jpath, vals)
+
+        # # root model
+        # model: Node = Node()
+        # with open(options.input_file, "r") as fj_dump:
+        #     while jobj := read_jobj_incrementally(fj_dump):
+        #         model.endorse_jobj(json.loads(jobj))
+        #
+        # print(model, file=OUTPUT_FILE)
+        # for r in model.telemetry():
+        #     path, field_endorsements, total_endorsements, _ = r
+        #     print(
+        #         f"{path} was seen {round((field_endorsements / total_endorsements) * 100, 1)}% of the time.",
+        #         file=OUTPUT_FILE
+        #     )
+        #
+        # print(
+        #     json.dumps(
+        #         model.schema(
+        #             inclusion_tolerance=options.inclusion_tolerance,
+        #             required_tolerance=options.required_tolerance,
+        #             do_property_description_prompt=options.do_property_description_prompt,
+        #             title=options.title,
+        #             description=options.description
+        #         ),
+        #         indent=4
+        #     ), file=OUTPUT_FILE
+        # )
+        # # noinspection SpellCheckingInspection
+        # print(model.get_property(
+        #     "$.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.plumery"))
+    finally:
+        OUTPUT_FILE.close()
 
 
 @dataclass
@@ -572,38 +654,4 @@ JOBJECT_SUPERSEDES_PRIMITIVES = True
 
 OUTPUT_FILE = sys.stdout
 if __name__ == "__main__":
-    options = _parse_args(sys.argv[1:])
-    try:
-        OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
-
-        # root model
-        model: Node = Node()
-        with open(options.input_file, "r") as fj_dump:
-            while jobj := read_jobj_incrementally(fj_dump):
-                model.endorse_jobj(json.loads(jobj))
-
-        print(model, file=OUTPUT_FILE)
-        for r in model.telemetry():
-            path, field_endorsements, total_endorsements, _ = r
-            print(
-                f"{path} was seen {round((field_endorsements / total_endorsements) * 100, 1)}% of the time.",
-                file=OUTPUT_FILE
-            )
-
-        print(
-            json.dumps(
-                model.schema(
-                    inclusion_tolerance=options.inclusion_tolerance,
-                    required_tolerance=options.required_tolerance,
-                    do_property_description_prompt=options.do_property_description_prompt,
-                    title=options.title,
-                    description=options.description
-                ),
-                indent=4
-            ), file=OUTPUT_FILE
-        )
-        # noinspection SpellCheckingInspection
-        print(model.get_property(
-            "$.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.plumery"))
-    finally:
-        OUTPUT_FILE.close()
+    main(_parse_args(sys.argv[1:]))
