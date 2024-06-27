@@ -3,6 +3,7 @@ import argparse
 import enum
 import functools
 import json
+import re
 import sys
 import types
 from copy import copy
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
-from typing import TextIO, Self, Iterator
+from typing import TextIO, Self, Iterator, Iterable
 
 
 def http_import(url, sha256sum) -> [object, str]:
@@ -47,7 +48,6 @@ utils, _ = http_import(
     "a3f50fac78f2dc71f5c4541f29837c8c8a7595190f3c328a6f26db6bd786b6f1"
 )
 
-type Node = object
 type Key = str
 type JsonPath = str
 type JsonArray = list
@@ -111,7 +111,7 @@ class JType(enum.Enum):
     def _new(_, value):
         if isinstance(value, types.NoneType):
             return JType.NULL
-        if isinstance(value, (dict, Node)):
+        if isinstance(value, dict):
             return JType.OBJECT
         if isinstance(value, list):
             return JType.ARRAY
@@ -153,6 +153,19 @@ class JPath:
     def __str__(self) -> str:
         return self.path
 
+    def __repr__(self) -> str:
+        return self.path
+
+    def __hash__(self) -> int:
+        return hash(self.path)
+
+    def __contains__(self, other: Self) -> bool:
+        assert isinstance(other, JPath)
+        for sp, op in zip_longest(self.components, other.components):
+            if sp != op:
+                return False
+        return True
+
     def __eq__(self, other: JPathLike | Self) -> bool:
         if other is None:
             return False
@@ -175,6 +188,13 @@ class JPath:
         return JPath(path=self.components + other.components)
 
     @property
+    def parent(self) -> Self | None:
+        # check for tld side-case
+        if self.rank == 1:
+            return None
+        return JPath(self.components[:-1])
+
+    @property
     def components(self) -> PathLike | list[str]:
         return copy(self.__components)
 
@@ -192,6 +212,7 @@ class JPath:
             if isinstance(element, int):
                 return f"[{element}]"
             return element
+
         return JPath.PATH_SEPARATOR.join(list(map(convert_array_indices, self.components)))
 
     @property
@@ -202,19 +223,53 @@ class JPath:
         return JPath.PATH_SEPARATOR.join(components)
 
     @property
-    def depth(self) -> int:
+    def rank(self) -> int:
         return len(self.components)
+
+    @property
+    def is_jarr(self) -> bool:
+        return JType(self.components[-1]).is_jarr()
+
+    def normalize(self) -> str:
+        # this escape is required, regexp is bad
+        # noinspection RegExpRedundantEscape
+        return re.sub(r"\[[0-9]+\]", JPath.ARRAY_WILDCARD_NOTATION, self.path)
+
+    @classmethod
+    def root(cls):
+        return cls(JPath.ROOT_NOTATION)
+
+    @classmethod
+    def jarr_wildcard(cls):
+        return cls(JPath.ARRAY_WILDCARD_NOTATION)
+
+    @classmethod
+    def bfs_sort(cls, jpaths: set[str]) -> set[Self]:
+        """
+        Natural sort a set of keys, & return the normalized set of paths.
+        The expected outcome should look like this ('bfs' sort):
+        [
+            $,
+            $.path,
+            $.path2,
+            $.path.inner,
+            $.path.[].inner,
+            $.path2.inner.inner
+        ]
+        """
+        raise NotImplementedError()  # TODO implement
 
 
 @utils.auto_str
 class JAggregate:
     def __init__(self, *values: ...):
-        self.__values: list[...] = []
+        # disabled until further notice
+        # self.__values: list[...] = []
         self.__types: list[JType] = []
         self.__self_aggregations: int = 0
         self.__aggregations_per_type: dict[JType, int] = {}
         if values:
-            self.aggragate(values)
+            self.aggragate(*values)
 
     def __add__(self, other: Self) -> Self:
         if not isinstance(other, JAggregate):
@@ -226,7 +281,8 @@ class JAggregate:
             aggregation_sum[k] = self.__aggregations_per_type.get(k, 0) + other.__aggregations_per_type.get(k, 0)
 
         new_aggregate = JAggregate()
-        new_aggregate.__values = list(set(self.values + other.values))
+        # disabled until further notice
+        # new_aggregate.__values = list(set(self.values + other.values))
         new_aggregate.__types = list(set(self.types + other.types))
         new_aggregate.__aggregations_per_type = aggregation_sum
         new_aggregate.__self_aggregations = self.__self_aggregations + other.__self_aggregations
@@ -241,9 +297,10 @@ class JAggregate:
             return
         self.__aggregations_per_type[jtype] += 1
 
-    @property
-    def values(self):
-        return copy(self.__values)
+    # disabled until further notice
+    # @property
+    # def values(self):
+    #     return copy(self.__values)
 
     @property
     def types(self) -> list[JType]:
@@ -261,7 +318,8 @@ class JAggregate:
         Get appearance statistics for a specific jtype.
         :return: % of appearances
         """
-        return self.__aggregations_per_type[jtype] / functools.reduce(lambda x, y: x + y, list(self.__aggregations_per_type.values()), 0)
+        return self.__aggregations_per_type[jtype] / functools.reduce(lambda x, y: x + y,
+                                                                      list(self.__aggregations_per_type.values()), 0)
 
     def aggragate(self, *values):
         """
@@ -271,8 +329,12 @@ class JAggregate:
             return
         self.__self_aggregations += 1
         for v in values:
-            self.__values.append(v)
+            # self.__values.append(v)
             self.__aggregate_jtype(JType(v))
+
+
+# use this because __repr__ is a piece of shit
+JAggregate.__repr__ = JAggregate.__str__
 
 
 # TODO rename to JAggregator
@@ -282,222 +344,79 @@ class JAggregate:
 # TODO move all schema & output-relevant logic from here to JSchema
 # this class must serve the sole & explicit role of collecting the data correctly; this MUST NOT
 #  have any logic regarding types etc; just collect the data sanely (!)
+#  The reason to build the schema in a bottom-up way is, so we can keep track of our father's type
+#  which is necessary, in order to know 'where' to place our jschema
+#  obviously, this 'data' is in the json path itself:
+#  - when our parent is a regular string, it means we're part of an object;
+#  - when our parent is an integer, it means we're part of an array
+#  check this information with .parent().is_jarr
 @utils.auto_str
-class Node:
-    def __init__(self, path: JsonPath = "$"):
-        self.__path: JsonPath = path
-        self.keyed_data: dict[Key, list[Primitive | Composite | Node]] = {}
-        self.keyed_endorsements: dict[Key, int] = {}
-        self.total_endorsements = 0
+class JAggregator:
+    def __init__(self):
+        # dict w/ NORMALIZED keys!
+        self.aggregates: dict[str, JAggregate] = {}
 
-    @property
-    def path(self) -> JsonPath:
-        """
-        :return: the current path
-        """
-        return self.__path
+    def aggregate(self, jpath: JPath, value):
+        assert isinstance(jpath, JPath)
+        normalized_key = jpath.normalize()
+        if normalized_key not in self.aggregates:
+            self.aggregates[normalized_key] = JAggregate(value)
+            return
 
-    @property
-    def name(self) -> str:
-        return self.path.split(JPath.PATH_SEPARATOR)[-1]
+        self.aggregates[normalized_key].aggragate(value)
 
-    def abs_path(self, k: Key) -> JsonPath:
-        """
-        :return: the absolute path to a key
-        """
-        return JPath.PATH_SEPARATOR.join([*self.path.split(JPath.PATH_SEPARATOR), k])
+    def get(self, key: JPath) -> JAggregate | None:
+        assert isinstance(key, JPath)
+        normalized_key = key.normalize()
+        if normalized_key not in self.aggregates:
+            return None
 
-    def rel_path(self, path: Key) -> JsonPath:
-        """
-        :return: the relative path to a key, from the current node
-        """
-        return path.removeprefix(self.path).removeprefix(JPath.PATH_SEPARATOR)
+        return self.aggregates[normalized_key]
 
-    def _increment_endorsement(self, k: Key) -> Self:
-        if k not in self.keyed_endorsements:
-            self.keyed_endorsements[k] = 1
-            return self
+    def bfs(self):
+        jpaths = JPath.bfs_sort(set(self.aggregates.keys()))
+        for jp in jpaths:
+            print(jp)
 
-        self.keyed_endorsements[k] += 1
-        return self
+        # TODO start yielding & afterwards building the (bottom-up) jschema here!
 
-    def _create_node(self, k: Key, o: ...) -> Self | ...:
-        if not isinstance(o, dict):
-            return o
 
-        o: dict
-        jobj = Node(path=self.abs_path(k))
-        jobj.endorse_jobj(o)
-        return jobj
+def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | str = None) -> Iterator[tuple[...]]:
+    """
+    :raises JTypeDoesNotExist: if $ is not a jcomposite
+    :returns: JPath, object
+    """
 
-    def _aggragate_field_types(self,
-                               inclusion_tolerance: float,
-                               required_tolerance: float,
-                               do_property_description_prompt: bool,
-                               title: str | None = None,
-                               description: str | None = None) -> dict[str, str | list[str] | dict]:
-        schema = {"type": str(JType(self))}
-        property_types = {}
-        for key, values in self.keyed_data.items():
-            property_types[key] = []
-            values: list
-            for item in values:
-                property_types[key].append(str(JType(item)))
-
-        if len(property_types.keys()) > 0:
-            schema["properties"] = {}
-            for key, value in property_types.items():
-                jtype = list(set(value))
-                final_jtype = {"type": jtype}
-                # TODO this is wrong on so many levels
-                #  object definitions/properties can coexist with primitives, so this is redundant & incorrect
-                field_has_own_properties = "object" in jtype if JOBJECT_SUPERSEDES_PRIMITIVES else (
-                        len(jtype) == 1 and jtype[0] == "object"
-                )
-                if field_has_own_properties:
-                    reference = None
-                    for v in self.keyed_data[key]:
-                        if isinstance(v, Node):
-                            reference = v
-                            break
-                    final_jtype = reference.schema(
-                        inclusion_tolerance,
-                        required_tolerance,
-                        do_property_description_prompt,
-                        title,
-                        description,
-                    )
-
-                schema["properties"] = schema["properties"] | {key: final_jtype}
-        return schema
-
-    def endorse_jobj(self, jobj: JsonObject | dict) -> Self:
-        self.total_endorsements += 1
-        for k, v in jobj.items():
-            self._increment_endorsement(k)
-            to_endorse = self._create_node(k, v)
-
-            if k not in self.keyed_data:
-                self.keyed_data[k] = [to_endorse]
+    def delegate_obj(jl: JType.OBJECT.value, jp: JPath):
+        for k, v in jl.items():
+            if JType(v).is_composite():
+                yield from walk(v, root_path=jp / k)
                 continue
+            yield jp / k, v
+        return
 
-            # special case
-            # if we're about to endorse a node, check if it actually exists so no multiple nodes exist as values
-            #  since composites can do their own tracking, we don't have to keep everything about them
-            if isinstance(to_endorse, Node):
-                endorsed_node = list(filter(lambda i: isinstance(i, Node), self.keyed_data[k]))
-                assert len(endorsed_node) <= 1  # sanity
-                if len(endorsed_node) == 1:
-                    endorsed_node[0].endorse_jobj(v)
-                    continue
-            self.keyed_data[k].append(to_endorse)
+    def delegate_jarr(jl: JType.ARRAY.value, jp: JPath):
+        for i in range(len(jl)):
+            v = jl[i]
+            if JType(v).is_composite():
+                yield from walk(v, root_path=jp / i)
+                continue
+            yield jp / i, v
+        return
 
-        return self
-
-    def get_property(self, path: JsonPath) -> tuple[Primitive | Composite | Self, int, int]:
-        """
-        :return: the value & the keyed_endorsements along the way
-        """
-        path = path.removeprefix(JPath.PATH_SEPARATOR).removesuffix(JPath.PATH_SEPARATOR)
-        current_node = self
-        components_left = current_node.rel_path(path).split(JPath.PATH_SEPARATOR)
-        if components_left[0] not in current_node.keyed_data:
-            raise JPathDoesNotExist(current_node, components_left)
-
-        current_endorsements = current_node.keyed_endorsements[components_left[0]]
-        total_endorsements = current_node.keyed_endorsements[components_left[0]]
-        while components_left:
-            current_node = current_node.keyed_data[components_left[0]]
-            # if we have to continue from this point forward, get the node (if it exists)
-            if len(components_left) > 1:
-                eligible_node_list = list(filter(lambda i: isinstance(i, Node), current_node))
-                if not eligible_node_list:
-                    raise JPathDoesNotExist(current_node, components_left[1:])
-
-                assert len(eligible_node_list) == 1
-                current_node = eligible_node_list[0]
-            if not isinstance(current_node, Node):
-                return current_node, current_endorsements, total_endorsements
-
-            components_left = current_node.rel_path(path).split(JPath.PATH_SEPARATOR)
-            if components_left[0] not in current_node.keyed_data:
-                raise JPathDoesNotExist(current_node, components_left)
-
-            current_endorsements += current_node.keyed_endorsements[components_left[0]]
-            total_endorsements += current_node.total_endorsements
-
-        return current_node, current_endorsements, total_endorsements
-
-    def schema(self,
-               inclusion_tolerance: float,
-               required_tolerance: float,
-               do_property_description_prompt: bool,
-               title: str | None = None,
-               description: str | None = None) -> dict:
-        return self._aggragate_field_types(
-            inclusion_tolerance,
-            required_tolerance,
-            do_property_description_prompt,
-            title,
-            description,
-        )
-
-    def telemetry(self) -> list[tuple[str, int, int, list[Primitive | Composite]]]:
-        """
-        To get % of times seen, use round((keyed_endorsements/total_endorsements)*100, 0)
-        :return: A path-sorted list of [path.to.field, keyed_endorsements, total_endorsements, [types]]
-        """
-        data = []
-        for k, v in self.keyed_data.items():
-            keyed_endorsement = self.keyed_endorsements[k]
-
-            data.append((
-                self.abs_path(k),
-                keyed_endorsement,
-                self.total_endorsements,
-                v
-            ))
-
-            # check for special case: nested endorsements
-            nodes_in_values = list(filter(lambda i: isinstance(i, Node), v))
-            # data sanity check: this list must never have more than 1 element
-            assert len(nodes_in_values) <= 1
-            if bool(len(nodes_in_values)):
-                nested_telemetry = nodes_in_values[0].telemetry()
-                for nested_record in nested_telemetry:
-                    data.append((
-                        nested_record[0],
-                        keyed_endorsement + nested_record[1],
-                        self.total_endorsements + nested_record[2],
-                        nested_record[3]
-                    ))
-        return list(sorted(data, key=lambda item: item[0]))
-
-
-def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | str = None) -> Iterator[tuple[JPath, ...]]:
-    def is_delegate(el: JType.OBJECT.value | JType.ARRAY.value) -> bool:
-        return JType(el).is_composite()
+    delegates = {
+        JType.OBJECT: delegate_obj,
+        JType.ARRAY: delegate_jarr
+    }
 
     jtype = JType(jelement)
     jpath = JPath(root_path)
-    if jtype.is_jobj():
-        for k, v in jelement.items():
-            if is_delegate(v):
-                yield from walk(v, root_path=jpath / k)
-                continue
-            yield jpath / k, v
-        return
+    if not jtype.is_composite():
+        raise JTypeDoesNotExist(f"Invalid root jelement {jelement} type {jtype}")
 
-    if jtype.is_jarr():
-        for i in range(len(jelement)):
-            v = jelement[i]
-            if is_delegate(v):
-                yield from walk(v, root_path=jpath / i)
-                continue
-            yield jpath / i, v
-        return
-
-    raise JTypeDoesNotExist(f"Invalid root jelement {jelement} type {jtype}")
+    yield jpath, jelement
+    yield from delegates[jtype](jelement, jpath)
+    return
 
 
 # TODO rewrite this delusional piece of shit
@@ -554,51 +473,25 @@ def main(options) -> None:
     try:
         OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
 
+        # root model
+        model: JAggregator = JAggregator()
         with open(options.input_file, "r") as fj_dump:
             while jobj := read_jobj_incrementally(fj_dump):
-                for tup in walk(json.loads(jobj)):
-                    jpath, *vals = tup
-                    print(jpath, vals)
+                jobj_model = JAggregator()
+                for jpath, value in walk(json.loads(jobj)):
+                    jobj_model.aggregate(jpath, value)
+                    model.aggregate(jpath, value)
+                print(jobj_model.get(JPath.root() / "myarray" / JPath.jarr_wildcard()))
 
-        # # root model
-        # model: Node = Node()
-        # with open(options.input_file, "r") as fj_dump:
-        #     while jobj := read_jobj_incrementally(fj_dump):
-        #         model.endorse_jobj(json.loads(jobj))
-        #
-        # print(model, file=OUTPUT_FILE)
-        # for r in model.telemetry():
-        #     path, field_endorsements, total_endorsements, _ = r
-        #     print(
-        #         f"{path} was seen {round((field_endorsements / total_endorsements) * 100, 1)}% of the time.",
-        #         file=OUTPUT_FILE
-        #     )
-        #
-        # print(
-        #     json.dumps(
-        #         model.schema(
-        #             inclusion_tolerance=options.inclusion_tolerance,
-        #             required_tolerance=options.required_tolerance,
-        #             do_property_description_prompt=options.do_property_description_prompt,
-        #             title=options.title,
-        #             description=options.description
-        #         ),
-        #         indent=4
-        #     ), file=OUTPUT_FILE
-        # )
-        # # noinspection SpellCheckingInspection
-        # print(model.get_property(
-        #     "$.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.plumery"))
+        print(model)
+
     finally:
         OUTPUT_FILE.close()
 
 
 @dataclass
 class UserOptions:
-    # --from-jdump <filename>
-    # --from-jarray <filename>
     input_file: Path
-    input_is_jobj_dump_or_array: bool
     # --title <title str>
     title: str
     # --description <description str>
@@ -623,10 +516,8 @@ class UserOptions:
 
 
 def _parse_args(args) -> UserOptions:
-    parser = argparse.ArgumentParser(description="json-roulette: a barebones json generator, for testing")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--from-jdump", type=str, default=None)
-    group.add_argument("--from-jarray", type=str, default=None)
+    parser = argparse.ArgumentParser(description="jproof: a json-schema generator")
+    parser.add_argument("--from-jdump", type=str, default=None, required=True)
     parser.add_argument("--title", type=str, default="JSON Dump", required=False)
     parser.add_argument("--description", type=str, default="JSON Schema from a dump.", required=False)
     parser.add_argument("--tolerance", type=float, default=1.0, required=False)
@@ -634,13 +525,11 @@ def _parse_args(args) -> UserOptions:
     parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
     parser.add_argument("--output", type=str, default=None, required=False)
     options = parser.parse_args(args)
-    input_file = Path(options.from_jdump).expanduser() if options.from_jdump else None
-    input_file = Path(options.from_jarray).expanduser() if options.from_jarray else input_file
+    input_file = Path(options.from_jdump).expanduser()
     assert 0 < options.tolerance <= 1.0
     assert 0 <= options.required_tolerance <= 1.0
     return UserOptions(
         input_file=input_file,
-        input_is_jobj_dump_or_array=bool(options.from_jdump),
         title=options.title,
         description=options.description,
         inclusion_tolerance=options.tolerance,
@@ -649,8 +538,6 @@ def _parse_args(args) -> UserOptions:
         output=options.output
     )
 
-
-JOBJECT_SUPERSEDES_PRIMITIVES = True
 
 OUTPUT_FILE = sys.stdout
 if __name__ == "__main__":
