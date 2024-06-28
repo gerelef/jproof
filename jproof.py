@@ -48,13 +48,6 @@ utils, _ = http_import(
     "a3f50fac78f2dc71f5c4541f29837c8c8a7595190f3c328a6f26db6bd786b6f1"
 )
 
-type Key = str
-type JsonPath = str
-type JsonArray = list
-type JsonObject = dict
-type Composite = JsonObject | JsonArray
-type Primitive = str | int | float | bool | None
-
 
 class JPathDoesNotExist(Exception):
     pass
@@ -204,7 +197,6 @@ class JPath:
             raise JPathDoesNotExist()
         return self.components[-1]
 
-    # TODO this outputs a non-standard way for JsonPath indices: for example, this will currently output $.thing.[0].thing2
     @property
     def path(self) -> str:
         # delegate to map
@@ -244,7 +236,7 @@ class JPath:
         return cls(JPath.ARRAY_WILDCARD_NOTATION)
 
     @classmethod
-    def bfs_sort(cls, jpaths: set[str]) -> set[Self]:
+    def bfs_sort(cls, jpaths: set[str]) -> list[Self]:
         """
         Natural sort a set of keys, & return the normalized set of paths.
         The expected outcome should look like this ('bfs' sort):
@@ -257,7 +249,7 @@ class JPath:
             $.path2.inner.inner
         ]
         """
-        raise NotImplementedError()  # TODO implement
+        return sorted(set(map(lambda p: JPath(p), jpaths)), key=lambda i: i.rank)
 
 
 @utils.auto_str
@@ -337,14 +329,11 @@ class JAggregate:
 JAggregate.__repr__ = JAggregate.__str__
 
 
-# TODO rename to JAggregator
-# TODO provide ways to access all data sanely w/ BFS (walk)
-#      - BFS should probably return the JPath & the data relevant to the field we're currently walking through
-# TODO support arrays before continuing development! this might backfire
+# TODO start yielding & afterwards building the (bottom-up) jschema here!
 # TODO move all schema & output-relevant logic from here to JSchema
 # this class must serve the sole & explicit role of collecting the data correctly; this MUST NOT
 #  have any logic regarding types etc; just collect the data sanely (!)
-#  The reason to build the schema in a bottom-up way is, so we can keep track of our father's type
+# The reason to build the schema in a bottom-up way is, so we can keep track of our father's type
 #  which is necessary, in order to know 'where' to place our jschema
 #  obviously, this 'data' is in the json path itself:
 #  - when our parent is a regular string, it means we're part of an object;
@@ -373,12 +362,55 @@ class JAggregator:
 
         return self.aggregates[normalized_key]
 
-    def bfs(self):
-        jpaths = JPath.bfs_sort(set(self.aggregates.keys()))
-        for jp in jpaths:
-            print(jp)
+    def reverse_treeline_iterator(self) -> Iterator[JPath]:
+        """
+        Return a reverse treeline of all given nodes in a path.
+        Will always return ROOT as the final result.
+        For an example output, this will return the following outputs for the top level output:
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal.anthropidae
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker.alisphenoidal
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus.marshbanker
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate.torus
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant.eccoriate
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist.gerant
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus.agamist
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus.torus
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant.torus
+        $.agamist.chloralum.chloralum.plumery.dunged.inaccordant
+        $.agamist.chloralum.chloralum.plumery.dunged
+        $.agamist.chloralum.chloralum.plumery
+        $.agamist.chloralum.chloralum
+        $.agamist.chloralum
+        $.agamist
+        $
+        ... starting from the beginning (on another node)
+        """
+        def yield_ancestry(jpath: JPath) -> Iterator[JPath]:
+            parent = jpath.parent
+            yield parent
+            # don't return null if no parents (exit condition)
+            if not parent.parent:
+                return
+            yield from yield_ancestry(parent)
 
-        # TODO start yielding & afterwards building the (bottom-up) jschema here!
+        index = 0
+        jpaths = JPath.bfs_sort(set(self.aggregates.keys()))[::-1]
+        while index < len(jpaths):
+            jp = jpaths[index]
+            yield jp, self.aggregates[jp.normalize()]
+
+            jpaths.remove(jp)
+            # don't return null if no parents
+            if not jp.parent:
+                continue
+
+            ancestry = yield_ancestry(jp)
+            for ancestor in ancestry:
+                if ancestor in jpaths:
+                    jpaths.remove(ancestor)
+                yield ancestor, self.aggregates[ancestor.normalize()]
+
+        return
 
 
 def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | str = None) -> Iterator[tuple[...]]:
@@ -389,6 +421,9 @@ def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | st
 
     def delegate_obj(jl: JType.OBJECT.value, jp: JPath):
         for k, v in jl.items():
+            # sanity check: json allows for keys named "my.thing.etc" but this will massively fuck up everything
+            if isinstance(v, Iterable):
+                assert JPath.PATH_SEPARATOR not in v
             if JType(v).is_composite():
                 yield from walk(v, root_path=jp / k)
                 continue
@@ -398,6 +433,9 @@ def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | st
     def delegate_jarr(jl: JType.ARRAY.value, jp: JPath):
         for i in range(len(jl)):
             v = jl[i]
+            # sanity check: json allows for keys named "my.thing.etc" but this will massively fuck up everything
+            if isinstance(v, Iterable):
+                assert JPath.PATH_SEPARATOR not in v
             if JType(v).is_composite():
                 yield from walk(v, root_path=jp / i)
                 continue
@@ -477,13 +515,12 @@ def main(options) -> None:
         model: JAggregator = JAggregator()
         with open(options.input_file, "r") as fj_dump:
             while jobj := read_jobj_incrementally(fj_dump):
-                jobj_model = JAggregator()
                 for jpath, value in walk(json.loads(jobj)):
-                    jobj_model.aggregate(jpath, value)
                     model.aggregate(jpath, value)
-                print(jobj_model.get(JPath.root() / "myarray" / JPath.jarr_wildcard()))
 
         print(model)
+        for jp, jagg in model.reverse_treeline_iterator():
+            print(jp, jagg)
 
     finally:
         OUTPUT_FILE.close()
