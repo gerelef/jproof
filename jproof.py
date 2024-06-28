@@ -362,7 +362,7 @@ class JAggregator:
 
         return self.aggregates[normalized_key]
 
-    def reverse_treeline_iterator(self) -> Iterator[JPath]:
+    def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
         Return a reverse treeline of all given nodes in a path.
         Will always return ROOT as the final result.
@@ -518,9 +518,9 @@ def main(options) -> None:
                 for jpath, value in walk(json.loads(jobj)):
                     model.aggregate(jpath, value)
 
-        print(model)
         for jp, jagg in model.reverse_treeline_iterator():
-            print(jp, jagg)
+            print(jp)
+            print(jagg)
 
     finally:
         OUTPUT_FILE.close()
