@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
-from typing import TextIO, Self, Iterator
+from typing import TextIO, Iterator, TypeAlias
+import platform
+
+Self = object
+if int(platform.python_version_tuple()[1]) >= 11:
+    from typing import Self
 
 
 def http_import(url, sha256sum) -> [object, str]:
@@ -56,10 +61,10 @@ class JTypeDoesNotExist(Exception):
     pass
 
 
-type JTypeObjectCandidate = dict
-type JTypeArrayCandidate = list
-type JTypeCompositeCandidate = JTypeObjectCandidate | JTypeArrayCandidate
-type JTypePrimitiveCandidate = types.NoneType | str | bool | int | float
+JTypeObjectCandidate: TypeAlias = dict
+JTypeArrayCandidate: TypeAlias = list
+JTypeCompositeCandidate: TypeAlias = JTypeObjectCandidate | JTypeArrayCandidate
+JTypePrimitiveCandidate: TypeAlias = types.NoneType | str | bool | int | float
 
 
 class JType(enum.Enum):
@@ -127,7 +132,7 @@ class JType(enum.Enum):
 
 JType.__new__ = JType._new
 
-type JPathLike = PathLike | list[str] | str
+JPathLike = PathLike | list[str] | str
 
 
 class JPath:
