@@ -3,7 +3,6 @@ import argparse
 import enum
 import functools
 import json
-import re
 import sys
 import types
 from copy import copy
@@ -11,7 +10,7 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
-from typing import TextIO, Self, Iterator, Iterable
+from typing import TextIO, Self, Iterator
 
 
 def http_import(url, sha256sum) -> [object, str]:
@@ -55,6 +54,12 @@ class JPathDoesNotExist(Exception):
 
 class JTypeDoesNotExist(Exception):
     pass
+
+
+type JTypeObjectCandidate = dict
+type JTypeArrayCandidate = list
+type JTypeCompositeCandidate = JTypeObjectCandidate | JTypeArrayCandidate
+type JTypePrimitiveCandidate = types.NoneType | str | bool | int | float
 
 
 class JType(enum.Enum):
@@ -143,6 +148,19 @@ class JPath:
         assert isinstance(path, list)
         self.__components = path
 
+    # map delegates
+    #  __convert_array_indices
+    #  __convert_string_indices
+    # noinspection PyMethodMayBeStatic
+    def __convert_array_indices(self, element) -> str:
+        if isinstance(element, int):
+            return f"[{element}]"
+        return element
+
+    # noinspection PyMethodMayBeStatic
+    def __convert_string_indices(self, element) -> int:
+        raise NotImplementedError()  # TODO
+
     def __str__(self) -> str:
         return self.path
 
@@ -199,13 +217,7 @@ class JPath:
 
     @property
     def path(self) -> str:
-        # delegate to map
-        def convert_array_indices(element) -> str:
-            if isinstance(element, int):
-                return f"[{element}]"
-            return element
-
-        return JPath.PATH_SEPARATOR.join(list(map(convert_array_indices, self.components)))
+        return JPath.PATH_SEPARATOR.join(list(map(self.__convert_array_indices, self.components)))
 
     @property
     def absolute(self):
@@ -218,22 +230,13 @@ class JPath:
     def rank(self) -> int:
         return len(self.components)
 
-    @property
     def is_jarr(self) -> bool:
-        return JType(self.components[-1]).is_jarr()
-
-    def normalize(self) -> str:
-        # this escape is required, regexp is bad
-        # noinspection RegExpRedundantEscape
-        return re.sub(r"\[[0-9]+\]", JPath.ARRAY_WILDCARD_NOTATION, self.path)
+        last_component = self.components[-1]
+        return last_component == JPath.ARRAY_WILDCARD_NOTATION or JType(last_component) == JType.INTEGER
 
     @classmethod
     def root(cls):
         return cls(JPath.ROOT_NOTATION)
-
-    @classmethod
-    def jarr_wildcard(cls):
-        return cls(JPath.ARRAY_WILDCARD_NOTATION)
 
     @classmethod
     def bfs_sort(cls, jpaths: set[str]) -> list[Self]:
@@ -254,45 +257,12 @@ class JPath:
 
 @utils.auto_str
 class JAggregate:
-    def __init__(self, *values: ...):
-        # disabled until further notice
-        # self.__values: list[...] = []
+    def __init__(self, value: ... = None):
         self.__types: list[JType] = []
         self.__self_aggregations: int = 0
         self.__aggregations_per_type: dict[JType, int] = {}
-        if values:
-            self.aggragate(*values)
-
-    def __add__(self, other: Self) -> Self:
-        if not isinstance(other, JAggregate):
-            raise TypeError(f"Cannot aggregate different {other} type {type(other)}!")
-
-        # sum the two statistic fields
-        aggregation_sum = {}
-        for k in set(self.__aggregations_per_type) | set(other.__aggregations_per_type):
-            aggregation_sum[k] = self.__aggregations_per_type.get(k, 0) + other.__aggregations_per_type.get(k, 0)
-
-        new_aggregate = JAggregate()
-        # disabled until further notice
-        # new_aggregate.__values = list(set(self.values + other.values))
-        new_aggregate.__types = list(set(self.types + other.types))
-        new_aggregate.__aggregations_per_type = aggregation_sum
-        new_aggregate.__self_aggregations = self.__self_aggregations + other.__self_aggregations
-        return new_aggregate
-
-    def __aggregate_jtype(self, jtype: JType):
-        if jtype not in self.__types:
-            self.__types.append(jtype)
-
-        if jtype not in self.__aggregations_per_type:
-            self.__aggregations_per_type[jtype] = 1
-            return
-        self.__aggregations_per_type[jtype] += 1
-
-    # disabled until further notice
-    # @property
-    # def values(self):
-    #     return copy(self.__values)
+        if value:
+            self.aggregate(value)
 
     @property
     def types(self) -> list[JType]:
@@ -313,26 +283,30 @@ class JAggregate:
         return self.__aggregations_per_type[jtype] / functools.reduce(lambda x, y: x + y,
                                                                       list(self.__aggregations_per_type.values()), 0)
 
-    def aggragate(self, *values):
+    def aggregate(self, value: ...):
         """
-        Aggregate N valid JType candidates to this container.
+        Aggregate a valid JType candidate to this container.
+        :param value: value to aggregate
         """
-        if not values:
-            return
+        jtype = JType(value)
         self.__self_aggregations += 1
-        for v in values:
-            # self.__values.append(v)
-            self.__aggregate_jtype(JType(v))
+
+        # self.__values.append(v)
+        if jtype not in self.__types:
+            self.__types.append(jtype)
+
+        if jtype not in self.__aggregations_per_type:
+            self.__aggregations_per_type[jtype] = 1
+            return
+        self.__aggregations_per_type[jtype] += 1
 
 
 # use this because __repr__ is a piece of shit
 JAggregate.__repr__ = JAggregate.__str__
 
 
-# TODO start yielding & afterwards building the (bottom-up) jschema here!
-# TODO move all schema & output-relevant logic from here to JSchema
 # this class must serve the sole & explicit role of collecting the data correctly; this MUST NOT
-#  have any logic regarding types etc; just collect the data sanely (!)
+#  have any logic regarding types etc.; just collect the data sanely (!)
 # The reason to build the schema in a bottom-up way is, so we can keep track of our father's type
 #  which is necessary, in order to know 'where' to place our jschema
 #  obviously, this 'data' is in the json path itself:
@@ -347,20 +321,49 @@ class JAggregator:
 
     def aggregate(self, jpath: JPath, value):
         assert isinstance(jpath, JPath)
-        normalized_key = jpath.normalize()
-        if normalized_key not in self.aggregates:
-            self.aggregates[normalized_key] = JAggregate(value)
-            return
+        if jpath.path not in self.aggregates:
+            self.aggregates[jpath.path] = JAggregate()
 
-        self.aggregates[normalized_key].aggragate(value)
+        self.aggregates[jpath.path].aggregate(value)
+
+    def collapse_arrays(self):
+        """
+        this method was created because of the following terrible bug:
+        {
+            "test": [
+                1,
+                2,
+                3
+            ]
+        }
+        {
+            "test": [
+                "string"
+            ]
+        }
+        when this is parsed, it'll output that $.test.[] hz is 2.0, which it's obviously not
+        this happens because for every $.test.[0], $.test.[1], $.test.[2], $.test.[3]
+        the path is normalized, which means that
+        $.test.[] is added 4 times
+
+        Another example:
+        $.explode.foreboding.abash.tenpins.enchanting.[] hz: 6.0
+        ... because of
+        $.explode.foreboding.abash.tenpins.enchanting.[0]
+        $.explode.foreboding.abash.tenpins.enchanting.[1]
+        $.explode.foreboding.abash.tenpins.enchanting.[2]
+        $.explode.foreboding.abash.tenpins.enchanting.[3]
+        $.explode.foreboding.abash.tenpins.enchanting.[4]
+        $.explode.foreboding.abash.tenpins.enchanting.[5]
+        """
+        raise NotImplementedError()  # TODO implement
 
     def get(self, key: JPath) -> JAggregate | None:
         assert isinstance(key, JPath)
-        normalized_key = key.normalize()
-        if normalized_key not in self.aggregates:
+        if key.path not in self.aggregates:
             return None
 
-        return self.aggregates[normalized_key]
+        return self.aggregates[key.path]
 
     def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
@@ -385,6 +388,7 @@ class JAggregator:
         $
         ... starting from the beginning (on another node)
         """
+
         def yield_ancestry(jpath: JPath) -> Iterator[JPath]:
             parent = jpath.parent
             yield parent
@@ -397,7 +401,7 @@ class JAggregator:
         jpaths = JPath.bfs_sort(set(self.aggregates.keys()))[::-1]
         while index < len(jpaths):
             jp = jpaths[index]
-            yield jp, self.aggregates[jp.normalize()]
+            yield jp, self.aggregates[jp.path]
 
             jpaths.remove(jp)
             # don't return null if no parents
@@ -408,34 +412,55 @@ class JAggregator:
             for ancestor in ancestry:
                 if ancestor in jpaths:
                     jpaths.remove(ancestor)
-                yield ancestor, self.aggregates[ancestor.normalize()]
+                yield ancestor, self.aggregates[ancestor.path]
 
         return
 
 
-def walk(jelement: JType.OBJECT.value | JType.ARRAY.value, root_path: JPath | str = None) -> Iterator[tuple[...]]:
+# This class is responsible for the recursive construction of the $ json-schema. This means the following:
+# - TODO finish responsibilities, we need to be verbose here
+class JSchema:
+    def __init__(self, jaggregator: JAggregator):
+        # TODO: add UserOptions
+        self.model = jaggregator
+
+    def schema(self) -> dict:
+        """
+        :return: a valid json-schema
+        """
+        root_aggregate = self.model.get(JPath.root())
+        for jpath, jaggregate in self.model.reverse_treeline_iterator():
+            # get the parent if it exists, otherwise get the root, which can only compare to itself
+            parent = self.model.get(jpath.parent) if jpath.parent else root_aggregate
+
+            print(f"{jpath} hz: {jaggregate.aggregations / parent.aggregations}")
+            jaggregate_types: list[JType] = jaggregate.types
+            for jt in jaggregate_types:
+                print(f"{jt} hz: {jaggregate.frequency(jt)}")
+
+        raise NotImplementedError()  # TODO implement
+
+
+def walk(jelement: JTypeCompositeCandidate, root_path: JPath | str = None) -> Iterator[tuple[...]]:
     """
     :raises JTypeDoesNotExist: if $ is not a jcomposite
     :returns: JPath, object
     """
 
-    def delegate_obj(jl: JType.OBJECT.value, jp: JPath):
+    def delegate_obj(jl: JTypeObjectCandidate, jp: JPath):
         for k, v in jl.items():
             # sanity check: json allows for keys named "my.thing.etc" but this will massively fuck up everything
-            if isinstance(v, Iterable):
-                assert JPath.PATH_SEPARATOR not in v
+            assert JPath.PATH_SEPARATOR not in k
             if JType(v).is_composite():
                 yield from walk(v, root_path=jp / k)
                 continue
             yield jp / k, v
         return
 
-    def delegate_jarr(jl: JType.ARRAY.value, jp: JPath):
+    def delegate_jarr(jl: JTypeArrayCandidate, jp: JPath):
         for i in range(len(jl)):
             v = jl[i]
-            # sanity check: json allows for keys named "my.thing.etc" but this will massively fuck up everything
-            if isinstance(v, Iterable):
-                assert JPath.PATH_SEPARATOR not in v
+            # sanity check is not needed here because we yield via the array wildcard
             if JType(v).is_composite():
                 yield from walk(v, root_path=jp / i)
                 continue
@@ -518,9 +543,12 @@ def main(options) -> None:
                 for jpath, value in walk(json.loads(jobj)):
                     model.aggregate(jpath, value)
 
-        for jp, jagg in model.reverse_treeline_iterator():
-            print(jp)
-            print(jagg)
+        # if we're dealing with unordered arrays, collapse the contents to avoid
+        #  index-significant handling
+        if options.unordered_arrays:
+            model.collapse_arrays()
+
+        print(json.dumps(JSchema(model).schema(), indent=4))
 
     finally:
         OUTPUT_FILE.close()
@@ -533,15 +561,19 @@ class UserOptions:
     title: str
     # --description <description str>
     description: str
+    # --prompt-for-description
+    do_property_description_prompt: bool
+    # --ordered
+    #   if the inverse of the below is set, the indexes within arrays will be considered important
+    unordered_arrays: bool
+    # TODO reenable when we figure out what exactly this means business-wise
     # --tolerance <tolerance> 0 < tolerance <= 1
     #   the higher this number is, the more things that will be included
-    inclusion_tolerance: float
+    # inclusion_tolerance: float
     # --required <tolerance>
     #   the higher this number is, the more things that will be included
     #   can be negative (no required)
     required_tolerance: float
-    # --prompt-for-description
-    do_property_description_prompt: bool
     # TODO enable when work is starting on constraints
     # --constraints type1,type2,...
     #   OPTIONAL: set to empty list by default
@@ -557,9 +589,10 @@ def _parse_args(args) -> UserOptions:
     parser.add_argument("--from-jdump", type=str, default=None, required=True)
     parser.add_argument("--title", type=str, default="JSON Dump", required=False)
     parser.add_argument("--description", type=str, default="JSON Schema from a dump.", required=False)
+    parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
+    parser.add_argument("--ordered", default=False, action="store_true", required=False)
     parser.add_argument("--tolerance", type=float, default=1.0, required=False)
     parser.add_argument("--required-tolerance", type=float, default=0.0, required=False)
-    parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
     parser.add_argument("--output", type=str, default=None, required=False)
     options = parser.parse_args(args)
     input_file = Path(options.from_jdump).expanduser()
@@ -569,9 +602,10 @@ def _parse_args(args) -> UserOptions:
         input_file=input_file,
         title=options.title,
         description=options.description,
-        inclusion_tolerance=options.tolerance,
-        required_tolerance=options.required_tolerance,
         do_property_description_prompt=options.prompt_for_description,
+        unordered_arrays=not options.ordered,
+        # inclusion_tolerance=options.tolerance,
+        required_tolerance=options.required_tolerance,
         output=options.output
     )
 
