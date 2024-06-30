@@ -49,7 +49,7 @@ def http_import(url, sha256sum) -> [object, str]:
 
 utils, _ = http_import(
     "https://raw.githubusercontent.com/gerelef/dotfiles/main/scripts/utils/modules/helpers.py",
-    "a3f50fac78f2dc71f5c4541f29837c8c8a7595190f3c328a6f26db6bd786b6f1"
+    "4110569f2ad92677cdc94002d3c52c9440de4f434636de580140e52b6f1d1d3b"
 )
 
 
