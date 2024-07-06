@@ -3,6 +3,7 @@ import argparse
 import enum
 import functools
 import json
+import platform
 import sys
 import types
 from copy import copy
@@ -11,7 +12,6 @@ from itertools import zip_longest
 from os import PathLike
 from pathlib import Path
 from typing import TextIO, Iterator, TypeAlias
-import platform
 
 Self = object
 if int(platform.python_version_tuple()[1]) >= 11:
@@ -87,19 +87,19 @@ class JType(enum.Enum):
     OBJECT = dict
     ARRAY = list
 
-    def is_jobj(self):
+    def is_jobj(self) -> bool:
         return self == JType.OBJECT
 
-    def is_jarr(self):
+    def is_jarr(self) -> bool:
         return self == JType.ARRAY
 
-    def is_composite(self):
+    def is_composite(self) -> bool:
         return self.is_jobj() or self.is_jarr()
 
-    def is_primitive(self):
+    def is_primitive(self) -> bool:
         return not self.is_composite()
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self.is_jobj():
             return "object"
         if self.is_jarr():
@@ -239,14 +239,14 @@ class JPath:
     def basename(self) -> str:
         if not self.components:
             raise JPathDoesNotExist()
-        return self.components[-1]
+        return str(self.components[-1])
 
     @property
     def path(self) -> str:
         return JPath.PATH_SEPARATOR.join(list(map(self.__convert_int_to_array_indices, self.components)))
 
     @property
-    def absolute(self):
+    def absolute(self) -> str:
         components = self.components
         if components[0] != JPath.ROOT_NOTATION:
             components.insert(0, JPath.ROOT_NOTATION)
@@ -274,7 +274,7 @@ class JPath:
         return JPath(normalized_components)
 
     @classmethod
-    def root(cls):
+    def root(cls) -> Self:
         return cls(JPath.ROOT_NOTATION)
 
     @classmethod
@@ -332,6 +332,13 @@ class JAggregate:
         """
         return self.__self_aggregations
 
+    def cap(self, total_aggregations: int) -> None:
+        """
+        Soft-cap total aggregations to provided number.
+        """
+        if self.__self_aggregations > total_aggregations:
+            self.__self_aggregations = total_aggregations
+
     def frequency(self, jtype: JType) -> float:
         """
         Get appearance statistics for a specific jtype.
@@ -340,7 +347,7 @@ class JAggregate:
         return self.__aggregations_per_type[jtype] / functools.reduce(lambda x, y: x + y,
                                                                       list(self.__aggregations_per_type.values()), 0)
 
-    def aggregate(self, value: ...):
+    def aggregate(self, value: ...) -> None:
         """
         Aggregate a valid JType candidate to this container.
         :param value: value to aggregate
@@ -374,16 +381,16 @@ JAggregate.__repr__ = JAggregate.__str__
 class JAggregator:
     def __init__(self):
         # dict w/ NORMALIZED keys!
-        self.aggregates: dict[JPath, JAggregate] = {}
+        self.__aggregates: dict[JPath, JAggregate] = {}
 
-    def aggregate(self, jpath: JPath, value):
+    def aggregate(self, jpath: JPath, value) -> None:
         assert isinstance(jpath, JPath)
-        if jpath.path not in self.aggregates:
-            self.aggregates[jpath] = JAggregate()
+        if jpath.path not in self.__aggregates:
+            self.__aggregates[jpath] = JAggregate()
 
-        self.aggregates[jpath].aggregate(value)
+        self.__aggregates[jpath].aggregate(value)
 
-    def normalize(self):
+    def normalize(self) -> None:
         """
         collapse_arrays; this method was created because of the following terrible bug:
         {
@@ -419,18 +426,31 @@ class JAggregator:
            for example, if `$.explode.foreboding.abash.tenpins.enchanting` was seen 2 times,
            the 'appearances' array will be capped to 2.
         """
-        jarr_paths: list[JPath] = JPath.nsorted(set(filter(lambda jp: jp.is_jarr(), self.aggregates.keys())))
-        for jarr_path in jarr_paths:
-            normalized_jp = jarr_path.normalize()
-            print(normalized_jp)
-        raise NotImplementedError()  # TODO implement
+        # step 1: normalize everything in the existing dict
+        normalized_aggregates: dict[JPath, JAggregate] = {}
+        jpaths: list[JPath] = list(self.__aggregates.keys())
+        for jpath in jpaths:
+            normalized_jp = jpath.normalize()
+            jaggregate = self.__aggregates.pop(jpath)
+            if normalized_jp not in normalized_aggregates:
+                normalized_aggregates[normalized_jp] = jaggregate
+                continue
+            normalized_aggregates[normalized_jp] += jaggregate
+
+        self.__aggregates = normalized_aggregates
+
+        # step 2: soft-cap each aggregate to its parent aggregations, as it literally CANNOT have a value bigger than 1
+        #  ... as explained (in detail) in this method's docs
+        for jpath, aggregate in self.__aggregates.items():
+            if parent_aggregate := self.get(jpath.parent):
+                aggregate.cap(parent_aggregate.aggregations)
 
     def get(self, key: JPath | None, or_else: object = None) -> JAggregate | None:
         assert key is None or isinstance(key, JPath)
-        if key is None or key.path not in self.aggregates:
+        if key is None or key.path not in self.__aggregates:
             return or_else
 
-        return self.aggregates[key]
+        return self.__aggregates[key]
 
     def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
@@ -465,10 +485,10 @@ class JAggregator:
             yield from yield_ancestry(parent)
 
         index = 0
-        jpaths = JPath.nsorted(set(self.aggregates.keys()))[::-1]
+        jpaths = JPath.nsorted(set(self.__aggregates.keys()))[::-1]
         while index < len(jpaths):
             jp = jpaths[index]
-            yield jp, self.aggregates[jp]
+            yield jp, self.__aggregates[jp]
 
             jpaths.remove(jp)
             # don't return null if no parents
@@ -479,7 +499,7 @@ class JAggregator:
             for ancestor in ancestry:
                 if ancestor in jpaths:
                     jpaths.remove(ancestor)
-                yield ancestor, self.aggregates[ancestor]
+                yield ancestor, self.__aggregates[ancestor]
 
         return
 
@@ -515,7 +535,7 @@ def walk(jelement: JTypeCompositeCandidate, root_path: JPath | str = None) -> It
     :returns: JPath, object
     """
 
-    def delegate_obj(jl: JTypeObjectCandidate, jp: JPath):
+    def delegate_obj(jl: JTypeObjectCandidate, jp: JPath) -> Iterator[tuple[...]]:
         for k, v in jl.items():
             # sanity check: json allows for keys named "my.thing.etc" but this will massively fuck up everything
             assert JPath.PATH_SEPARATOR not in k
@@ -525,7 +545,7 @@ def walk(jelement: JTypeCompositeCandidate, root_path: JPath | str = None) -> It
             yield jp / k, v
         return
 
-    def delegate_jarr(jl: JTypeArrayCandidate, jp: JPath):
+    def delegate_jarr(jl: JTypeArrayCandidate, jp: JPath) -> Iterator[tuple[...]]:
         for i in range(len(jl)):
             v = jl[i]
             # sanity check is not needed here because we yield via the array wildcard
