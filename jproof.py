@@ -523,8 +523,11 @@ class JSchema:
             parent = self.model.get(jpath.parent, or_else=root_aggregate)
 
             print(f"{jpath} hz: {jaggregate.aggregations / parent.aggregations}")
-            for jt in jaggregate.types:
-                print(f"{jt} hz: {jaggregate.frequency(jt)}")
+            # FIXME there's an unexpected behaviour here; if there is no content
+            #  in the array, the do not get counted for the field, however the nested
+            #  fields do indeed see it; check "test" jarr key behaviour for more insight
+            # for jt in jaggregate.types:
+            #     print(f"{jt} hz: {jaggregate.frequency(jt)}")
 
         raise NotImplementedError()  # TODO implement
 
