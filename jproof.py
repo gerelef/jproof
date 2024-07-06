@@ -17,6 +17,17 @@ Self = object
 if int(platform.python_version_tuple()[1]) >= 11:
     from typing import Self
 
+try:
+    import readline
+except ImportError:
+    print(
+        "FATAL: jproof REQUIRES the 'readline' module to be available. "
+        "This is often provided from the GNU readline package. "
+        "If you are unaware of what this means, consult the documentation and/or your system administrator.",
+        file=sys.stderr
+    )
+    sys.exit(1)
+
 
 def http_import(url, sha256sum) -> [object, str]:
     """
@@ -424,9 +435,9 @@ class JAggregator:
 
 # This class is responsible for the recursive construction of the $ json-schema. This means the following:
 # - TODO finish responsibilities, we need to be verbose here
+# TODO add UserOptions
 class JSchema:
     def __init__(self, jaggregator: JAggregator):
-        # TODO: add UserOptions
         self.model = jaggregator
 
     def schema(self) -> dict:
