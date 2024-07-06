@@ -244,7 +244,7 @@ class JPath:
         return cls(JPath.ROOT_NOTATION)
 
     @classmethod
-    def bfs_sort(cls, jpaths: set[str]) -> list[Self]:
+    def bfs_sort(cls, jpaths: set[Self]) -> list[Self]:
         """
         Natural sort a set of keys, & return the normalized set of paths.
         The expected outcome should look like this ('bfs' sort):
@@ -257,7 +257,7 @@ class JPath:
             $.path2.inner.inner
         ]
         """
-        return sorted(set(map(lambda p: JPath(p), jpaths)), key=lambda i: i.rank)
+        return sorted(jpaths, key=lambda i: i.rank)
 
 
 @utils.auto_str
@@ -322,18 +322,18 @@ JAggregate.__repr__ = JAggregate.__str__
 class JAggregator:
     def __init__(self):
         # dict w/ NORMALIZED keys!
-        self.aggregates: dict[str, JAggregate] = {}
+        self.aggregates: dict[JPath, JAggregate] = {}
 
     def aggregate(self, jpath: JPath, value):
         assert isinstance(jpath, JPath)
         if jpath.path not in self.aggregates:
-            self.aggregates[jpath.path] = JAggregate()
+            self.aggregates[jpath] = JAggregate()
 
-        self.aggregates[jpath.path].aggregate(value)
+        self.aggregates[jpath].aggregate(value)
 
-    def collapse_arrays(self):
+    def normalize(self):
         """
-        this method was created because of the following terrible bug:
+        collapse_arrays; this method was created because of the following terrible bug:
         {
             "test": [
                 1,
@@ -368,7 +368,7 @@ class JAggregator:
         if key.path not in self.aggregates:
             return None
 
-        return self.aggregates[key.path]
+        return self.aggregates[key]
 
     def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
@@ -406,7 +406,7 @@ class JAggregator:
         jpaths = JPath.bfs_sort(set(self.aggregates.keys()))[::-1]
         while index < len(jpaths):
             jp = jpaths[index]
-            yield jp, self.aggregates[jp.path]
+            yield jp, self.aggregates[jp]
 
             jpaths.remove(jp)
             # don't return null if no parents
@@ -417,7 +417,7 @@ class JAggregator:
             for ancestor in ancestry:
                 if ancestor in jpaths:
                     jpaths.remove(ancestor)
-                yield ancestor, self.aggregates[ancestor.path]
+                yield ancestor, self.aggregates[ancestor]
 
         return
 
@@ -548,10 +548,10 @@ def main(options) -> None:
                 for jpath, value in walk(json.loads(jobj)):
                     model.aggregate(jpath, value)
 
-        # if we're dealing with unordered arrays, collapse the contents to avoid
+        # if we're dealing with unordered arrays, normalize the contents to avoid
         #  index-significant handling
         if options.unordered_arrays:
-            model.collapse_arrays()
+            model.normalize()
 
         print(json.dumps(JSchema(model).schema(), indent=4))
 
