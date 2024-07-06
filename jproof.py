@@ -154,28 +154,38 @@ class JPath:
     def __init__(self, path: JPathLike | Self = None):
         if path is None:
             path = [JPath.ROOT_NOTATION]
-        if isinstance(path, str):
-            path = path.split(JPath.PATH_SEPARATOR)
+        if isinstance(path, str | list):
+            path = self.__jp_from_path(path)
         if isinstance(path, JPath):
             path = path.components
 
         # this must be true or we have massively fucked up
         path: list[str]
         assert isinstance(path, list)
-        self.__components = path
+        self.__components: list[str | int] = path
 
     # map delegates
     #  __convert_array_indices
     #  __convert_string_indices
     # noinspection PyMethodMayBeStatic
-    def __convert_array_indices(self, element) -> str:
+    def __convert_int_to_array_indices(self, element: str | int) -> str:
         if isinstance(element, int):
             return f"[{element}]"
         return element
 
     # noinspection PyMethodMayBeStatic
-    def __convert_string_indices(self, element) -> int:
-        raise NotImplementedError()  # TODO
+    def __convert_array_to_int_indices(self, element: str) -> str | int:
+        has_array_wrapping = isinstance(element, str) and element.startswith("[") and element.endswith("]")
+        # at least 3 elements required to display [n], along w/ the array wrapping
+        if has_array_wrapping and len(element) >= 3:
+            return int(element[1:-1])
+        return element
+
+    def __jp_from_path(self, jpathlike: list[str] | str) -> list[str | int]:
+        if isinstance(jpathlike, str):
+            jpathlike = jpathlike.split(JPath.PATH_SEPARATOR)
+
+        return list(map(self.__convert_array_to_int_indices, jpathlike))
 
     def __str__(self) -> str:
         return self.path
@@ -233,7 +243,7 @@ class JPath:
 
     @property
     def path(self) -> str:
-        return JPath.PATH_SEPARATOR.join(list(map(self.__convert_array_indices, self.components)))
+        return JPath.PATH_SEPARATOR.join(list(map(self.__convert_int_to_array_indices, self.components)))
 
     @property
     def absolute(self):
@@ -250,14 +260,27 @@ class JPath:
         last_component = self.components[-1]
         return last_component == JPath.ARRAY_WILDCARD_NOTATION or JType(last_component) == JType.INTEGER
 
+    def normalize(self) -> Self:
+        """
+        :return: A new object, which is the normalized version of self.
+        """
+        normalized_components = []
+        for component in self.components:
+            if isinstance(component, int):
+                normalized_components.append(JPath.ARRAY_WILDCARD_NOTATION)
+                continue
+            normalized_components.append(component)
+
+        return JPath(normalized_components)
+
     @classmethod
     def root(cls):
         return cls(JPath.ROOT_NOTATION)
 
     @classmethod
-    def bfs_sort(cls, jpaths: set[Self]) -> list[Self]:
+    def nsorted(cls, jpaths: set[Self]) -> list[Self]:
         """
-        Natural sort a set of keys, & return the normalized set of paths.
+        Natural sort a set of keys.
         The expected outcome should look like this ('bfs' sort):
         [
             $,
@@ -279,6 +302,24 @@ class JAggregate:
         self.__aggregations_per_type: dict[JType, int] = {}
         if value:
             self.aggregate(value)
+
+    def __add__(self, other: Self) -> Self:
+        assert isinstance(other, JAggregate)
+        types: list[JType] = self.__types + other.__types
+        self_aggregations: int = self.__self_aggregations + other.__self_aggregations
+        aggregations_per_type: dict[JType, int] = copy(self.__aggregations_per_type)
+        for other_aggregations_type, other_aggregations_appearances in other.__aggregations_per_type.items():
+            if other_aggregations_type not in aggregations_per_type:
+                aggregations_per_type[other_aggregations_type] = other_aggregations_appearances
+                continue
+
+            aggregations_per_type[other_aggregations_type] += other_aggregations_appearances
+
+        new = JAggregate()
+        new.__types = types
+        new.__self_aggregations = self_aggregations
+        new.__aggregations_per_type = aggregations_per_type
+        return new
 
     @property
     def types(self) -> list[JType]:
@@ -371,12 +412,22 @@ class JAggregator:
         $.explode.foreboding.abash.tenpins.enchanting.[3]
         $.explode.foreboding.abash.tenpins.enchanting.[4]
         $.explode.foreboding.abash.tenpins.enchanting.[5]
+        ...
+        The consequence of this function, will be the following:
+        - the aggregates will be summed.
+        - if at least one element existed, whatever it was, the frequency will be capped to it's parent
+           for example, if `$.explode.foreboding.abash.tenpins.enchanting` was seen 2 times,
+           the 'appearances' array will be capped to 2.
         """
+        jarr_paths: list[JPath] = JPath.nsorted(set(filter(lambda jp: jp.is_jarr(), self.aggregates.keys())))
+        for jarr_path in jarr_paths:
+            normalized_jp = jarr_path.normalize()
+            print(normalized_jp)
         raise NotImplementedError()  # TODO implement
 
-    def get(self, key: JPath, or_else: object = None) -> JAggregate | None:
-        assert isinstance(key, JPath)
-        if key.path not in self.aggregates:
+    def get(self, key: JPath | None, or_else: object = None) -> JAggregate | None:
+        assert key is None or isinstance(key, JPath)
+        if key is None or key.path not in self.aggregates:
             return or_else
 
         return self.aggregates[key]
@@ -414,7 +465,7 @@ class JAggregator:
             yield from yield_ancestry(parent)
 
         index = 0
-        jpaths = JPath.bfs_sort(set(self.aggregates.keys()))[::-1]
+        jpaths = JPath.nsorted(set(self.aggregates.keys()))[::-1]
         while index < len(jpaths):
             jp = jpaths[index]
             yield jp, self.aggregates[jp]
@@ -452,8 +503,7 @@ class JSchema:
             parent = self.model.get(jpath.parent, or_else=root_aggregate)
 
             print(f"{jpath} hz: {jaggregate.aggregations / parent.aggregations}")
-            jaggregate_types: list[JType] = jaggregate.types
-            for jt in jaggregate_types:
+            for jt in jaggregate.types:
                 print(f"{jt} hz: {jaggregate.frequency(jt)}")
 
         raise NotImplementedError()  # TODO implement
