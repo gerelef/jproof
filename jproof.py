@@ -374,10 +374,10 @@ class JAggregator:
         """
         raise NotImplementedError()  # TODO implement
 
-    def get(self, key: JPath) -> JAggregate | None:
+    def get(self, key: JPath, or_else: object = None) -> JAggregate | None:
         assert isinstance(key, JPath)
         if key.path not in self.aggregates:
-            return None
+            return or_else
 
         return self.aggregates[key]
 
@@ -445,9 +445,11 @@ class JSchema:
         :return: a valid json-schema
         """
         root_aggregate = self.model.get(JPath.root())
+        assert root_aggregate is not None  # sanity check
+
         for jpath, jaggregate in self.model.reverse_treeline_iterator():
             # get the parent if it exists, otherwise get the root, which can only compare to itself
-            parent = self.model.get(jpath.parent) if jpath.parent else root_aggregate
+            parent = self.model.get(jpath.parent, or_else=root_aggregate)
 
             print(f"{jpath} hz: {jaggregate.aggregations / parent.aggregations}")
             jaggregate_types: list[JType] = jaggregate.types
