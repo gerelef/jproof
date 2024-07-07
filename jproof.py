@@ -576,53 +576,45 @@ def walk(jelement: JTypeCompositeCandidate, root_path: JPath | str = None) -> It
     return
 
 
-# TODO rewrite this delusional piece of shit
-def read_jobj_incrementally(f: TextIO) -> str | None:
+def read_jroot_incrementally(f: TextIO) -> dict | list | None:
     """
     :return: a string representation of a json object from file
     """
-    mark = f.tell()
-    total_bytes_read = 0
 
-    def get_next_tokens() -> str:
-        nonlocal total_bytes_read, offset
-        buffer_size = 4096
-        offset = buffer_size - 1
-        total_bytes_read += buffer_size
-        return f.read(buffer_size)
+    def is_start_token(c: str) -> bool:
+        return c == "[" or c == "{"
 
-    entity = ""
-    offset = 0
-    quoted = False
-    # the first buffer's whitespace to the left is insignificant
-    buffer = get_next_tokens().lstrip()
-    if not buffer:
-        return None
-    bracket_count = 0
-    assert buffer[0] == "{"
+    def is_end_token(sc, ec: str) -> bool:
+        if sc == "{" and ec == "}":
+            return True
+        if sc == "[" and ec == "]":
+            return True
+        return False
+
+    start_prev = 0
     while True:
-        previous = None
-        for c in buffer:
-            offset -= 1
-            entity += c
-            if c == "\"" and previous != "\\":
-                quoted = not quoted
-            bracket_offset = 0
-            if not quoted and c == "{":
-                bracket_offset = 1
-            if not quoted and c == "}":
-                bracket_offset = -1
-
-            bracket_count += bracket_offset
-            if bracket_count == 0:
-                break
-            previous = c
-
-        if bracket_count == 0:
+        start_c = f.read(1)
+        start = f.tell()
+        if start_prev == start:
+            return None
+        start_prev = start
+        if is_start_token(start_c):
+            start -= 1
             break
-        buffer = get_next_tokens()
-    f.seek(mark + total_bytes_read - offset)
-    return entity
+
+    end_prev = start
+    while True:
+        end_c = f.read(1)
+        end = f.tell()
+        if end_prev == end:
+            raise json.JSONDecodeError("No ending character!", f.read(end - start), end)
+        end_prev = end
+        if is_end_token(start_c, end_c):
+            try:
+                f.seek(start)
+                return json.loads(f.read(end - start))
+            except json.JSONDecodeError:
+                f.seek(end)
 
 
 def main(options) -> None:
@@ -633,8 +625,8 @@ def main(options) -> None:
         # root model
         model: JAggregator = JAggregator()
         with open(options.input_file, "r") as fj_dump:
-            while jobj := read_jobj_incrementally(fj_dump):
-                for jpath, value in walk(json.loads(jobj)):
+            while jroot := read_jroot_incrementally(fj_dump):
+                for jpath, value in walk(jroot):
                     model.aggregate(jpath, value)
 
         # if we're dealing with unordered arrays, normalize the contents to avoid
