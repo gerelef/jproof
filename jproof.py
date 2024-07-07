@@ -441,16 +441,19 @@ class JAggregator:
 
         # step 2: soft-cap each aggregate to its parent aggregations, as it literally CANNOT have a value bigger than 1
         #  ... as explained (in detail) in this method's docs
-        for jpath, aggregate in self.__aggregates.items():
+        sorted_keys = JPath.nsorted(set(self.__aggregates.keys()))
+        for jpath in sorted_keys:
+            # ... if there IS a parent aggregate
             if parent_aggregate := self.get(jpath.parent):
-                aggregate.cap(parent_aggregate.aggregations)
+                self.get(jpath).cap(parent_aggregate.aggregations)
 
     def get(self, key: JPath | None, or_else: object = None) -> JAggregate | None:
+        """
+        :return: Aggregate that matches the key, otherwise return or_else (by default, None).
+        """
         assert key is None or isinstance(key, JPath)
-        if key is None or key.path not in self.__aggregates:
-            return or_else
-
-        return self.__aggregates[key]
+        ret_val = self.__aggregates.get(key)
+        return ret_val if ret_val is not None else or_else
 
     def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
