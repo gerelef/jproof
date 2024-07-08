@@ -305,7 +305,7 @@ class JAggregate:
 
     def __add__(self, other: Self) -> Self:
         assert isinstance(other, JAggregate)
-        types: list[JType] = self.__types + other.__types
+        types: list[JType] = list(set(self.__types + other.__types))
         self_aggregations: int = self.__self_aggregations + other.__self_aggregations
         aggregations_per_type: dict[JType, int] = copy(self.__aggregations_per_type)
         for other_aggregations_type, other_aggregations_appearances in other.__aggregations_per_type.items():
@@ -325,11 +325,13 @@ class JAggregate:
     def types(self) -> list[JType]:
         return copy(self.__types)
 
-    @property
-    def aggregations(self) -> int:
+    def aggregations(self, jtype: JType = None) -> int:
         """
         :return: the total number of aggregations of any value (self)
         """
+        if jtype:
+            assert jtype in self.__aggregations_per_type
+            return self.__aggregations_per_type[jtype]
         return self.__self_aggregations
 
     def cap(self, total_aggregations: int) -> None:
@@ -439,13 +441,16 @@ class JAggregator:
 
         self.__aggregates = normalized_aggregates
 
-        # step 2: soft-cap each aggregate to its parent aggregations, as it literally CANNOT have a value bigger than 1
+        # step 2: soft-cap ARRAY aggregate to the parent's ARRAY appearances,
+        #  as arrays are unique multi-value containers that must be counted
         #  ... as explained (in detail) in this method's docs
         sorted_keys = JPath.nsorted(set(self.__aggregates.keys()))
         for jpath in sorted_keys:
-            # ... if there IS a parent aggregate
+            if not jpath.is_jarr():
+                continue
+            # ... if there IS a parent aggregate of the array
             if parent_aggregate := self.get(jpath.parent):
-                self.get(jpath).cap(parent_aggregate.aggregations)
+                self.get(jpath).cap(parent_aggregate.aggregations(jtype=JType.ARRAY))
 
     def get(self, key: JPath | None, or_else: object = None) -> JAggregate | None:
         """
@@ -525,12 +530,12 @@ class JSchema:
             # get the parent if it exists, otherwise get the root, which can only compare to itself
             parent = self.model.get(jpath.parent, or_else=root_aggregate)
 
-            print(f"{jpath} hz: {jaggregate.aggregations / parent.aggregations}")
+            print(f"{jpath} hz: {jaggregate.aggregations() / parent.aggregations()}")
             # FIXME there's an unexpected behaviour here; if there is no content
             #  in the array, the do not get counted for the field, however the nested
             #  fields do indeed see it; check "test" jarr key behaviour for more insight
-            # for jt in jaggregate.types:
-            #     print(f"{jt} hz: {jaggregate.frequency(jt)}")
+            for jt in jaggregate.types:
+                print(f"{jpath}:{jt} hz: {jaggregate.frequency(jt)}")
 
         raise NotImplementedError()  # TODO implement
 
