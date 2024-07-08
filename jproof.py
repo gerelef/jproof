@@ -198,7 +198,7 @@ class JPath:
 
     def __contains__(self, other: Self) -> bool:
         assert isinstance(other, JPath)
-        for sp, op in zip_longest(self.components, other.components):
+        for sp, op in zip(self.components, other.components):
             if sp != op:
                 return False
         return True
@@ -255,6 +255,32 @@ class JPath:
     @property
     def rank(self) -> int:
         return len(self.components)
+
+    def rebase(self, new_base: Self) -> Self:
+        """
+        Rebase the current path to a new root. For example, take the following two jpaths:
+        $.basifier                             <- new base
+        $.basifier.huzzaed.[].sedimentary      <- "self"
+
+        with components:
+        $ basifier
+        $ basifier huzzaed [] sedimentary
+
+        ------- self, after: -------
+
+        $ huzzaed [] sedimentary
+        :returns: a rebased new JPath
+        """
+        assert isinstance(new_base, JPath)
+        assert self in new_base
+
+        new_components = new_base.components
+        self_components = self.components
+        while len(new_components) > 0 and ((nc := new_components.pop(0)) == (sc := self_components.pop(0))):
+            pass
+
+        self_components.insert(0, JPath.ROOT_NOTATION)
+        return JPath(self_components)
 
     def is_jarr(self) -> bool:
         last_component = self.components[-1]
