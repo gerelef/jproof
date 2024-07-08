@@ -623,9 +623,9 @@ def read_jroot_incrementally(f: TextIO) -> dict | list | None:
 
 
 def main(options) -> None:
-    global OUTPUT_FILE
+    output_file = None
     try:
-        OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
+        output_file = open(options.output, "w") if options.output else sys.stdout
         JPath.PATH_SEPARATOR = options.sep  # set user-defined json separator for insane case where keys have a dot
 
         # root model
@@ -640,10 +640,10 @@ def main(options) -> None:
         if options.unordered_arrays:
             model.normalize()
 
-        print(json.dumps(JSchema(model).schema(), indent=4))
-
+        print(json.dumps(JSchema(model).schema(), indent=4 if options.pretty else None), file=output_file)
     finally:
-        OUTPUT_FILE.close()
+        if output_file:
+            output_file.close()
 
 
 @dataclass
@@ -669,6 +669,9 @@ class UserOptions:
     # TODO enable when work is starting on constraints
     # --constraints type1,type2,...
     #   OPTIONAL: set to empty list by default
+    # --pretty
+    #  OPTIONAL: will pretty print or not
+    pretty: bool
     # --output
     #   OPTIONAL
     #   use this argument with - for stdout to echo to stdout
@@ -687,6 +690,7 @@ def _parse_args(args) -> UserOptions:
     parser.add_argument("--ordered", default=False, action="store_true", required=False)
     # parser.add_argument("--tolerance", type=float, default=1.0, required=False)
     # parser.add_argument("--required-tolerance", type=float, default=0.0, required=False)
+    parser.add_argument("--pretty", default=False, action="store_true", required=False)
     parser.add_argument("--output", type=str, default=None, required=False)
     parser.add_argument("--separator", "--sep", type=str, default=None, required=False)
     options = parser.parse_args(args)
@@ -700,11 +704,11 @@ def _parse_args(args) -> UserOptions:
         unordered_arrays=not options.ordered,
         # inclusion_tolerance=options.tolerance,
         # required_tolerance=options.required_tolerance,
+        pretty=options.pretty,
         output=options.output,
         sep=options.separator if options.separator else JPath.PATH_SEPARATOR
     )
 
 
-OUTPUT_FILE = sys.stdout
 if __name__ == "__main__":
     main(_parse_args(sys.argv[1:]))
