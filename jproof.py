@@ -626,6 +626,7 @@ def main(options) -> None:
     global OUTPUT_FILE
     try:
         OUTPUT_FILE = open(options.output, "w") if options.output else sys.stdout
+        JPath.PATH_SEPARATOR = options.sep  # set user-defined json separator for insane case where keys have a dot
 
         # root model
         model: JAggregator = JAggregator()
@@ -653,7 +654,7 @@ class UserOptions:
     # --description <description str>
     description: str
     # --prompt-for-description
-    do_property_description_prompt: bool
+    # do_property_description_prompt: bool
     # --ordered
     #   if the inverse of the below is set, the indexes within arrays will be considered important
     unordered_arrays: bool
@@ -664,7 +665,7 @@ class UserOptions:
     # --required <tolerance>
     #   the higher this number is, the more things that will be included
     #   can be negative (no required)
-    required_tolerance: float
+    # required_tolerance: float
     # TODO enable when work is starting on constraints
     # --constraints type1,type2,...
     #   OPTIONAL: set to empty list by default
@@ -673,31 +674,34 @@ class UserOptions:
     #   use this argument with - for stdout to echo to stdout
     #   use this argument with /dev/null to silence completely (wtf)
     output: Path | None
+    # --separator, --sep
+    sep: str
 
 
 def _parse_args(args) -> UserOptions:
     parser = argparse.ArgumentParser(description="jproof: a json-schema generator")
-    parser.add_argument("--from-jdump", type=str, default=None, required=True)
+    parser.add_argument("path", type=str)
     parser.add_argument("--title", type=str, default="JSON Dump", required=False)
     parser.add_argument("--description", type=str, default="JSON Schema from a dump.", required=False)
-    parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
+    # parser.add_argument("--prompt-for-description", default=False, action="store_true", required=False)
     parser.add_argument("--ordered", default=False, action="store_true", required=False)
-    parser.add_argument("--tolerance", type=float, default=1.0, required=False)
-    parser.add_argument("--required-tolerance", type=float, default=0.0, required=False)
+    # parser.add_argument("--tolerance", type=float, default=1.0, required=False)
+    # parser.add_argument("--required-tolerance", type=float, default=0.0, required=False)
     parser.add_argument("--output", type=str, default=None, required=False)
+    parser.add_argument("--separator", "--sep", type=str, default=None, required=False)
     options = parser.parse_args(args)
-    input_file = Path(options.from_jdump).expanduser()
-    assert 0 < options.tolerance <= 1.0
-    assert 0 <= options.required_tolerance <= 1.0
+    input_file = Path(options.path).expanduser()
+    # TODO implement verbose value range check from arguments, sys.exit 2 if wrong
     return UserOptions(
         input_file=input_file,
         title=options.title,
         description=options.description,
-        do_property_description_prompt=options.prompt_for_description,
+        # do_property_description_prompt=options.prompt_for_description,
         unordered_arrays=not options.ordered,
         # inclusion_tolerance=options.tolerance,
-        required_tolerance=options.required_tolerance,
-        output=options.output
+        # required_tolerance=options.required_tolerance,
+        output=options.output,
+        sep=options.separator if options.separator else JPath.PATH_SEPARATOR
     )
 
 
