@@ -282,6 +282,9 @@ class JPath:
         self_components.insert(0, JPath.ROOT_NOTATION)
         return JPath(self_components)
 
+    def is_root(self) -> bool:
+        return len(self.components) == 1 and self.components[0] == JPath.ROOT_NOTATION
+
     def is_jarr(self) -> bool:
         last_component = self.components[-1]
         return last_component == JPath.ARRAY_WILDCARD_NOTATION or JType(last_component) == JType.INTEGER
@@ -486,6 +489,18 @@ class JAggregator:
         ret_val = self.__aggregates.get(key)
         return ret_val if ret_val is not None else or_else
 
+    def treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
+        stack = []
+        jp: JPath
+        ja: JAggregate
+        for jp, ja in self.reverse_treeline_iterator():
+            stack.insert(0, (jp, ja))
+            if jp.is_root():
+                yield from stack
+                stack.clear()
+
+        return
+
     def reverse_treeline_iterator(self) -> Iterator[tuple[JPath, JAggregate]]:
         """
         Return a reverse treeline of all given nodes in a path.
@@ -539,7 +554,7 @@ class JAggregator:
 
 
 # This class is responsible for the recursive construction of the $ json-schema. This means the following:
-# - TODO finish responsibilities, we need to be verbose here
+# TODO finish responsibilities, we need to be verbose here
 # TODO add UserOptions
 class JSchema:
     def __init__(self, jaggregator: JAggregator):
@@ -552,16 +567,16 @@ class JSchema:
         root_aggregate = self.model.get(JPath.root())
         assert root_aggregate is not None  # sanity check
 
+        # step 1:
+        #  iterate, from the bottom to the top (reverse) any treeline
+        #  on every step, produce a schema to be assigned to its parent
         for jpath, jaggregate in self.model.reverse_treeline_iterator():
             # get the parent if it exists, otherwise get the root, which can only compare to itself
             parent = self.model.get(jpath.parent, or_else=root_aggregate)
-
-            print(f"{jpath} hz: {jaggregate.aggregations() / parent.aggregations()}")
-            # FIXME there's an unexpected behaviour here; if there is no content
-            #  in the array, the do not get counted for the field, however the nested
-            #  fields do indeed see it; check "test" jarr key behaviour for more insight
-            for jt in jaggregate.types:
-                print(f"{jpath}:{jt} hz: {jaggregate.frequency(jt)}")
+            print(jpath)
+            # print(f"{jpath} hz: {jaggregate.aggregations() / parent.aggregations()}")
+            # for jt in jaggregate.types:
+            #     print(f"{jpath}:{jt} hz: {jaggregate.frequency(jt)}")
 
         raise NotImplementedError()  # TODO implement
 
@@ -615,7 +630,7 @@ def read_jroot_incrementally(f: TextIO) -> dict | list | None:
     def is_start_token(c: str) -> bool:
         return c == "[" or c == "{"
 
-    def is_end_token(sc, ec: str) -> bool:
+    def is_end_token(sc: str, ec: str) -> bool:
         if sc == "{" and ec == "}":
             return True
         if sc == "[" and ec == "]":
