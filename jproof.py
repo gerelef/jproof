@@ -29,39 +29,17 @@ except ImportError:
     sys.exit(1)
 
 
-def http_import(url, sha256sum) -> [object, str]:
-    """
-    Load single-file lib from the web.
-    :returns: types.ModuleType, filename
-    """
+def auto_str(cls):
+    """Automatically implements __str__ for any class."""
 
-    class HashMismatchException(Exception):
-        pass
+    def __str__(self):
+        return '%s(%s)' % (
+            type(self).__name__,
+            ', '.join('%s=%s' % item for item in vars(self).items())
+        )
 
-    class NoSha256DigestProvided(Exception):
-        pass
-
-    if sha256sum is None:
-        raise NoSha256DigestProvided()
-    import os
-    import types
-    import hashlib
-    import urllib.request
-    import urllib.parse
-    code = urllib.request.urlopen(url).read()
-    digest = hashlib.sha256(code, usedforsecurity=True).hexdigest()
-    if digest == sha256sum:
-        filename = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(url).path))
-        module = types.ModuleType(filename)
-        exec(code, module.__dict__)
-        return module, filename
-    raise HashMismatchException(f"SHA256 DIGEST MISMATCH:\n\tEXPECTED: {sha256sum}\n\tACTUAL: {digest}")
-
-
-utils, _ = http_import(
-    "https://raw.githubusercontent.com/gerelef/dotfiles/main/scripts/utils/modules/helpers.py",
-    "4110569f2ad92677cdc94002d3c52c9440de4f434636de580140e52b6f1d1d3b"
-)
+    cls.__str__ = __str__
+    return cls
 
 
 class JPathDoesNotExist(Exception):
@@ -323,7 +301,7 @@ class JPath:
         return sorted(jpaths, key=lambda i: i.rank)
 
 
-@utils.auto_str
+@auto_str
 class JAggregate:
     def __init__(self, value: ... = None):
         self.__types: list[JType] = []
@@ -408,7 +386,7 @@ JAggregate.__repr__ = JAggregate.__str__
 #  - when our parent is a regular string, it means we're part of an object;
 #  - when our parent is an integer, it means we're part of an array
 #  check this information with .parent().is_jarr
-@utils.auto_str
+@auto_str
 class JAggregator:
     def __init__(self):
         # dict w/ NORMALIZED keys!
@@ -577,6 +555,10 @@ class JSchema:
             # print(f"{jpath} hz: {jaggregate.aggregations() / parent.aggregations()}")
             # for jt in jaggregate.types:
             #     print(f"{jpath}:{jt} hz: {jaggregate.frequency(jt)}")
+
+        # step n:
+        #  assign metadata to the root json object.
+        # TODO
 
         raise NotImplementedError()  # TODO implement
 
